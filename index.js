@@ -5,8 +5,8 @@ const { startWhatsApp, sendMessage, logoutWhatsApp, getStatus, getQr, forceGener
 // Additional API route for sending messages
 app.post('/api/messages/send', async (req, res) => {
     try {
-        const { groupId, text, type, media } = req.body;
-        const msg = await sendMessage(groupId, text, type, media);
+        const { groupId, text, type, media, quotedMsgId } = req.body;
+        const msg = await sendMessage(groupId, text, type, media, quotedMsgId);
         res.json(msg);
     } catch (err) {
         res.status(500).json({ error: err.message });
