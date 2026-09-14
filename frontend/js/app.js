@@ -483,8 +483,7 @@ async function sendMessage() {
 
     if (window.replyMsg) {
         payload.quotedMsgId = window.replyMsg.id;
-        window.replyMsg = null;
-        document.getElementById('message-input').placeholder = 'Type a message...';
+        clearReply();
     }
 
     await fetch('/api/messages/send', {
@@ -496,8 +495,25 @@ async function sendMessage() {
 
 function setReply(msg) {
     window.replyMsg = msg;
-    document.getElementById('message-input').placeholder = `Replying to ${msg.senderDisplay}...`;
     document.getElementById('message-input').focus();
+    
+    // Show Preview
+    const container = document.getElementById('reply-preview-container');
+    if (container) {
+        document.getElementById('reply-preview-sender').innerText = msg.senderDisplay || 'Unknown';
+        document.getElementById('reply-preview-text').innerText = msg.text || 'Media';
+        container.classList.remove('hidden');
+    }
+}
+
+function clearReply() {
+    window.replyMsg = null;
+    document.getElementById('message-input').focus();
+    
+    const container = document.getElementById('reply-preview-container');
+    if (container) {
+        container.classList.add('hidden');
+    }
 }
 
 async function reactToMsg(id, emoji) {

@@ -104,7 +104,18 @@
                 </div>
             </div>
 
-            <div id="chat-input-area" class="h-14 shrink-0 bg-white border-t flex items-center px-4 gap-2 hidden">
+            <!-- Reply Preview Block (Hidden by default) -->
+            <div id="reply-preview-container" class="hidden absolute bottom-[56px] left-0 w-full bg-slate-50 border-t border-b px-4 py-2 shadow-sm z-10 flex items-center justify-between">
+                <div class="flex-1 min-w-0 border-l-4 border-brand-primary pl-3 bg-white py-1 pr-2 rounded-r-md">
+                    <div class="text-brand-primary font-semibold text-[13px] leading-tight" id="reply-preview-sender">Sender Name</div>
+                    <div class="text-slate-500 text-[12px] truncate leading-tight mt-0.5" id="reply-preview-text">Message content here</div>
+                </div>
+                <button onclick="clearReply()" class="ml-4 p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+
+            <div id="chat-input-area" class="h-14 shrink-0 bg-white border-t flex items-center px-4 gap-2 hidden z-20">
                 <button class="p-2 text-slate-500 hover:text-brand-primary" id="emoji-btn"><i data-lucide="smile" class="w-5 h-5"></i></button>
                 <label class="p-2 text-slate-500 hover:text-brand-primary cursor-pointer">
                     <i data-lucide="paperclip" class="w-5 h-5"></i>
