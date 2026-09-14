@@ -245,10 +245,17 @@ async function sendMessage(groupId, text, type = 'text', mediaPath = null, quote
     if (!sock) throw new Error('WhatsApp not connected');
 
     const options = {};
+    let quotedMsgObj = null;
+    
     if (quotedMsgId) {
         const { Message } = require('./models');
         const quotedMsg = await Message.findOne({ id: quotedMsgId });
         if (quotedMsg) {
+            quotedMsgObj = {
+                id: quotedMsg.id,
+                sender: quotedMsg.senderDisplay,
+                text: quotedMsg.text
+            };
             options.quoted = {
                 key: {
                     id: quotedMsg.id,
@@ -276,19 +283,20 @@ async function sendMessage(groupId, text, type = 'text', mediaPath = null, quote
 
     if (sentMsg) {
         // Save outgoing message to DB
+        const { Message } = require('./models');
         const newMessage = await Message.create({
             id: sentMsg.key.id,
-            groupId: groupId,
-            senderId: sock.user.id,
-            senderDisplay: 'Boss', // Outgoing is always Boss
-            kind: 'me',
+            groupId,
+            senderId: sock.user.id.split(':')[0] + '@s.whatsapp.net',
+            senderDisplay: 'You',
+            kind: 'client',
             direction: 'out',
-            type: type,
-            text: text,
+            type,
+            text,
             mediaUrl: mediaPath,
             timestamp: Date.now(),
             status: 'sent',
-            quotedMsg: quotedMsgId ? { text: 'Replied to a message' } : null
+            quotedMsg: quotedMsgObj
         });
         
         await Group.updateOne({ id: groupId }, { lastAt: Date.now(), lastPreview: text || type });

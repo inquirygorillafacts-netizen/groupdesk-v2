@@ -344,9 +344,22 @@ function appendMessage(msg) {
                 <i data-lucide="reply" class="w-3.5 h-3.5 text-slate-600"></i>
             </button>
             ${msg.text ? `<button onclick="navigator.clipboard.writeText('${msg.text.replace(/'/g, "\\'")}'); alert('Copied')" class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="Copy"><i data-lucide="copy" class="w-3.5 h-3.5 text-slate-600"></i></button>` : ''}
-            <button onclick="reactToMsg('${msg.id}')" class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="React">
-                <i data-lucide="smile" class="w-3.5 h-3.5 text-slate-600"></i>
-            </button>
+            
+            <div class="relative group/react inline-block">
+                <button class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="React">
+                    <i data-lucide="smile" class="w-3.5 h-3.5 text-slate-600"></i>
+                </button>
+                <div class="hidden group-hover/react:flex absolute bottom-full pb-1 ${isOut ? 'right-0' : 'left-0'} z-50">
+                    <div class="bg-white border shadow-lg rounded-full px-2 py-1 flex items-center gap-1">
+                        <button onclick="reactToMsg('${msg.id}', '👍')" class="hover:scale-125 transition-transform text-base">👍</button>
+                        <button onclick="reactToMsg('${msg.id}', '❤️')" class="hover:scale-125 transition-transform text-base">❤️</button>
+                        <button onclick="reactToMsg('${msg.id}', '😂')" class="hover:scale-125 transition-transform text-base">😂</button>
+                        <button onclick="reactToMsg('${msg.id}', '😮')" class="hover:scale-125 transition-transform text-base">😮</button>
+                        <button onclick="reactToMsg('${msg.id}', '😢')" class="hover:scale-125 transition-transform text-base">😢</button>
+                        <button onclick="reactToMsg('${msg.id}', '🙏')" class="hover:scale-125 transition-transform text-base">🙏</button>
+                    </div>
+                </div>
+            </div>
         </div>
     `;
     
@@ -487,8 +500,7 @@ function setReply(msg) {
     document.getElementById('message-input').focus();
 }
 
-async function reactToMsg(id) {
-    const emoji = prompt('Enter emoji reaction (e.g. 👍, ❤️):', '👍');
+async function reactToMsg(id, emoji) {
     if (!emoji) return;
     
     await fetch('/api/messages/react', {
