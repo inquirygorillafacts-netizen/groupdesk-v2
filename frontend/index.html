@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GroupDesk V2</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            deep: '#064e3b', // emerald-900
+                            primary: '#10b981', // emerald-500
+                            light: '#d1fae5' // emerald-100
+                        },
+                        background: '#F6F5F1'
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Socket.io -->
+    <script src="/socket.io/socket.io.js"></script>
+    <!-- Emoji Picker (picmo) -->
+    <script src="https://cdn.jsdelivr.net/npm/picmo@latest/dist/umd/index.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@picmo/popup-picker@latest/dist/umd/index.js"></script>
+    <!-- Canvas Confetti -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="h-screen w-screen flex flex-col bg-background font-sans overflow-hidden">
+
+    <!-- Header -->
+    <header class="h-14 shrink-0 flex items-center justify-between px-4 shadow-sm bg-brand-deep text-white">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg bg-brand-primary flex items-center justify-center font-bold">G</div>
+            <div>
+                <div class="font-semibold text-[15px] leading-none">GroupDesk</div>
+                <div class="text-[11px] text-emerald-200/80 leading-none mt-1">WhatsApp Command Center</div>
+            </div>
+            <div class="hidden md:flex items-center gap-1.5 ml-4 text-xs text-emerald-100/90" id="connection-status">
+                <i data-lucide="circle" class="w-2 h-2 text-amber-300 fill-amber-300"></i> Disconnected
+            </div>
+        </div>
+        <div class="flex items-center gap-2">
+            <button onclick="openAdmin()" class="p-2 hover:bg-white/10 rounded-md transition" title="Settings">
+                <i data-lucide="settings" class="w-5 h-5"></i>
+            </button>
+        </div>
+    </header>
+
+    <div class="flex-1 flex overflow-hidden">
+        <!-- Sidebar -->
+        <aside class="w-[320px] shrink-0 border-r bg-white flex flex-col">
+            <div class="p-3">
+                <div class="relative">
+                    <i data-lucide="search" class="w-4 h-4 absolute left-2.5 top-2.5 text-slate-400"></i>
+                    <input type="text" id="search-groups" placeholder="Search groups" class="w-full pl-8 h-9 border rounded-md text-sm outline-none focus:border-brand-primary">
+                </div>
+            </div>
+            <hr>
+            <div class="flex-1 overflow-y-auto" id="groups-list">
+                <!-- Groups will be injected here -->
+            </div>
+            <div class="p-3 border-t bg-slate-50 text-[11px] text-slate-500">
+                <b>Privacy first:</b> Unknown people appear as <span class="font-semibold">R1, R2...</span> tags.
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="flex-1 flex flex-col relative bg-[#efeae2]">
+            <div id="active-group-header" class="h-14 shrink-0 border-b bg-white px-4 flex items-center justify-between hidden">
+                <div class="min-w-0">
+                    <div class="font-semibold text-[15px] truncate" id="active-group-name">Select a group</div>
+                    <div class="text-[12px] text-slate-500" id="active-group-anon">Anonymized</div>
+                </div>
+                <div class="relative w-48 hidden md:block">
+                    <i data-lucide="search" class="w-4 h-4 absolute left-2.5 top-2 text-slate-400"></i>
+                    <input type="text" id="search-messages" oninput="searchMessages(this.value)" placeholder="Search in chat..." class="w-full pl-8 h-8 rounded-md bg-slate-100 outline-none focus:ring-1 focus:ring-brand-primary text-sm">
+                </div>
+            </div>
+            
+            <div id="chat-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+                <div class="flex items-center justify-center h-full text-slate-400 text-sm">Select a group to start messaging.</div>
+            </div>
+
+            <!-- Media Preview Block (Hidden by default) -->
+            <div id="media-preview-container" class="hidden absolute bottom-[60px] left-0 w-full bg-white border-t p-4 shadow-lg z-10 flex flex-col">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-sm font-semibold text-slate-700">Media Preview</span>
+                    <button onclick="closeMediaPreview()" class="text-slate-500 hover:text-red-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+                </div>
+                <div class="flex gap-4 items-center">
+                    <div id="media-preview-content" class="w-32 h-32 bg-slate-100 rounded-lg flex items-center justify-center overflow-hidden"></div>
+                    <div class="flex-1">
+                        <input type="text" id="media-caption" placeholder="Add a caption..." class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:border-brand-primary">
+                    </div>
+                </div>
+            </div>
+
+            <div id="chat-input-area" class="h-14 shrink-0 bg-white border-t flex items-center px-4 gap-2 hidden">
+                <button class="p-2 text-slate-500 hover:text-brand-primary" id="emoji-btn"><i data-lucide="smile" class="w-5 h-5"></i></button>
+                <label class="p-2 text-slate-500 hover:text-brand-primary cursor-pointer">
+                    <i data-lucide="paperclip" class="w-5 h-5"></i>
+                    <input type="file" id="file-input" class="hidden" accept="image/*,video/*,audio/*,.pdf,.doc,.docx">
+                </label>
+                <input type="text" id="message-input" placeholder="Type a message..." class="flex-1 h-9 px-3 rounded-md border outline-none focus:border-brand-primary text-sm">
+                <button id="send-btn" class="p-2 bg-brand-primary text-white rounded-full hover:bg-emerald-600">
+                    <i data-lucide="send" class="w-4 h-4 ml-0.5"></i>
+                </button>
+            </div>
+        </main>
+    </div>
+
+    <!-- Admin PIN Modal -->
+    <div id="admin-modal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <div id="pin-section">
+                <h2 class="text-xl font-bold flex items-center gap-2 mb-2"><i data-lucide="shield" class="text-brand-primary w-5 h-5"></i> Admin PIN</h2>
+                <p class="text-sm text-slate-500 mb-6">Enter your PIN to access settings.</p>
+                <input type="password" id="admin-pin" placeholder="••••" class="w-full text-center text-2xl tracking-[1em] border rounded-lg py-3 outline-none focus:border-brand-primary mb-4">
+                <div class="flex justify-end gap-2">
+                    <button onclick="closeAdmin()" class="px-4 py-2 border rounded-md hover:bg-slate-50">Cancel</button>
+                    <button onclick="verifyPin()" class="px-4 py-2 bg-brand-primary text-white rounded-md hover:bg-emerald-600">Unlock</button>
+                </div>
+            </div>
+
+            <div id="settings-section" class="hidden">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold flex items-center gap-2"><i data-lucide="settings" class="text-brand-primary w-5 h-5"></i> Settings</h2>
+                    <button onclick="closeAdmin()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x"></i></button>
+                </div>
+                
+                <div class="border-b flex gap-4 mb-4">
+                    <button class="pb-2 border-b-2 border-brand-primary text-brand-primary font-medium" id="tab-qr" onclick="switchTab('qr')">WhatsApp QR</button>
+                    <button class="pb-2 border-b-2 border-transparent text-slate-500 font-medium" id="tab-groups" onclick="switchTab('groups')">Groups Setup</button>
+                </div>
+
+                <div id="content-qr">
+                    <p class="text-sm text-slate-500 mb-4">Scan the QR code with WhatsApp to connect.</p>
+                    <div id="qr-container" class="w-48 h-48 bg-slate-100 mx-auto rounded-lg flex items-center justify-center">
+                        <span class="text-sm text-slate-400">Loading QR...</span>
+                    </div>
+                </div>
+
+                <!-- Groups Content -->
+                <div id="content-groups" class="hidden flex flex-col h-full">
+                    <div class="flex justify-between items-center mb-4 shrink-0">
+                        <p class="text-sm text-slate-500">Enable or disable groups.</p>
+                        <button onclick="forceSyncGroups(event)" class="text-brand-primary hover:bg-emerald-50 px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 border border-brand-primary transition-colors">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Sync Groups
+                        </button>
+                    </div>
+                    
+                    <!-- Scrollable list container -->
+                    <div class="flex-1 overflow-y-auto pr-2 -mr-2">
+                        <div id="admin-groups-list" class="space-y-3">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fullscreen Media Viewer -->
+    <div id="fullscreen-viewer" class="fixed inset-0 bg-black/95 hidden items-center justify-center z-[100] backdrop-blur-sm" onclick="closeFullscreen()">
+        <button onclick="closeFullscreen()" class="absolute top-4 right-4 text-white hover:text-red-500"><i data-lucide="x" class="w-8 h-8"></i></button>
+        <div id="fullscreen-content" class="w-full h-full flex items-center justify-center p-8" onclick="event.stopPropagation()"></div>
+    </div>
+
+    <script src="/js/app.js"></script>
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.local
+baileys_auth_info/
+database/*.db
+database/*.json
+uploads/
+.DS_Store
