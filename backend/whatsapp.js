@@ -61,7 +61,12 @@ async function startWhatsApp() {
                 // If logged out, delete auth state from Supabase
                 const sessionId = process.env.SESSION_ID || 'default';
                 await supabase.from('auth_state').delete().eq('session_id', sessionId);
-                console.log('Logged out. Deleted auth info from Supabase.');
+                
+                // Disable all groups to prevent cross-sim ghost groups in UI
+                await supabase.from('groups').update({ enabled: false }).neq('id', '0');
+                io.emit('groups-updated');
+                
+                console.log('Logged out. Deleted auth info from Supabase and disabled all groups.');
             }
         } else if (connection === 'open') {
             connectionState = 'connected';
@@ -386,11 +391,16 @@ async function sendMessage(groupId, text, type = 'text', mediaUrl = null, quoted
 
 async function logoutWhatsApp() {
     if (sock) {
-        await sock.logout();
+        try { await sock.logout(); } catch(e) {}
         connectionState = 'disconnected';
         activeGroupJids = [];
         io.emit('wa-status', 'disconnected');
     }
+    
+    // Ensure all groups are disabled on explicit logout
+    await supabase.from('auth_state').delete().eq('session_id', 'default');
+    await supabase.from('groups').update({ enabled: false }).neq('id', '0');
+    io.emit('groups-updated');
 }
 
 async function forceGenerateQr() {
@@ -403,6 +413,11 @@ async function forceGenerateQr() {
     }
     // Delete existing auth info from DB
     await supabase.from('auth_state').delete().eq('session_id', 'default');
+    
+    // Disable all groups to prevent cross-sim ghost groups
+    await supabase.from('groups').update({ enabled: false }).neq('id', '0');
+    io.emit('groups-updated');
+    
     currentQr = null;
     await startWhatsApp();
 }
