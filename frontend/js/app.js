@@ -70,17 +70,24 @@ socket.on('wa-status', (status) => {
     const wasConnected = waConnected;
     waConnected = (status === 'connected');
     
-    if (waConnected) {
+    if (status === 'connected') {
         el.innerHTML = '<i data-lucide="circle" class="w-2 h-2 text-emerald-400 fill-emerald-400"></i> Connected';
         // Trigger surprise animation if it just connected
         if (!wasConnected) {
             confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
         }
+    } else if (status === 'connecting') {
+        el.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 text-amber-500 animate-spin"></i> Connecting...';
     } else {
         el.innerHTML = '<i data-lucide="circle" class="w-2 h-2 text-amber-300 fill-amber-300"></i> Disconnected';
     }
     lucide.createIcons();
-    updateQrUi();
+    
+    if (status === 'connecting') {
+        updateQrUi('connecting');
+    } else {
+        updateQrUi();
+    }
 });
 
 socket.on('groups-updated', () => {
@@ -88,16 +95,22 @@ socket.on('groups-updated', () => {
 });
 
 socket.on('new-message', (msg) => {
-    if (msg.groupId === activeGroupId) {
+    if (msg.group_id === activeGroupId) {
         appendMessage(msg);
         scrollToBottom();
     }
 });
 
+socket.on('reaction-updated', ({ messageId, reaction }) => {
+    // Optimistic or real-time update of reaction
+    // In our simplified DOM, we can just fetch messages again or update manually
+    // We'll update the specific node if we can find it, otherwise rely on fetch
+    fetchMessages(activeGroupId);
+});
+
 socket.on('qr-code', (qrDataUrl) => {
     if (waConnected) return; // Ignore if connected
-    const qrContainer = document.getElementById('qr-container');
-    qrContainer.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(qrDataUrl)}" class="w-full h-full rounded-lg shadow-sm" />`;
+    updateQrUi(qrDataUrl);
 });
 
 function updateQrUi(initialQr = null) {
@@ -119,7 +132,16 @@ function updateQrUi(initialQr = null) {
         `;
         lucide.createIcons();
     } else {
-        if (initialQr) {
+        if (initialQr === 'connecting') {
+            qrContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center p-6 text-center">
+                    <i data-lucide="loader-2" class="w-10 h-10 text-brand-primary animate-spin mb-4"></i>
+                    <h3 class="text-lg font-bold text-slate-700 mb-1">Connecting...</h3>
+                    <p class="text-sm text-slate-500">GroupDesk is linking to your WhatsApp.</p>
+                </div>
+            `;
+            lucide.createIcons();
+        } else if (initialQr) {
             qrContainer.innerHTML = `
                 <p class="text-sm text-slate-500 mb-4">Scan the QR code with WhatsApp to connect.</p>
                 <div id="qr-container" class="w-48 h-48 bg-white shadow-sm border mx-auto rounded-lg flex items-center justify-center p-2">
@@ -653,7 +675,7 @@ function renderAdminGroups() {
         let toggleHtml = '';
         if (group.isLive) {
             toggleHtml = `
-                <button onclick="toggleGroup('${group.id}', ${!group.enabled})" class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${group.enabled ? 'bg-brand-primary' : 'bg-slate-200'}">
+                <button onclick="toggleGroup('${group.id}', ${!group.enabled}, this)" class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${group.enabled ? 'bg-brand-primary' : 'bg-slate-200'}">
                     <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${group.enabled ? 'translate-x-4' : 'translate-x-0'}"></span>
                 </button>
             `;
@@ -679,7 +701,19 @@ function renderAdminGroups() {
     });
 }
 
-async function toggleGroup(id, enabled) {
+async function toggleGroup(id, enabled, btnEl) {
+    // Optimistic UI Update
+    if (btnEl) {
+        const dot = btnEl.querySelector('span');
+        if (enabled) {
+            btnEl.classList.replace('bg-slate-200', 'bg-brand-primary');
+            dot.classList.replace('translate-x-0', 'translate-x-4');
+        } else {
+            btnEl.classList.replace('bg-brand-primary', 'bg-slate-200');
+            dot.classList.replace('translate-x-4', 'translate-x-0');
+        }
+    }
+
     await fetch('/api/admin/toggle-group', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -734,22 +768,41 @@ async function saveSettings() {
     if (days > 90) days = 90;
     daysInput.value = days;
     
+    const newPinInput = document.getElementById('new-admin-pin');
+    const newPin = newPinInput ? newPinInput.value.trim() : '';
+    
     try {
-        await fetch('/api/admin/settings', {
+        const payload = {
+            pin: currentPin,
+            auto_delete_enabled: isEnabled,
+            auto_delete_days: days
+        };
+        if (newPin) {
+            payload.new_admin_pin = newPin;
+        }
+        
+        const res = await fetch('/api/admin/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                pin: currentPin,
-                auto_delete_enabled: isEnabled,
-                auto_delete_days: days
-            })
+            body: JSON.stringify(payload)
         });
+        
+        if (!res.ok) {
+            const data = await res.json();
+            throw new Error(data.error || 'Failed to save');
+        }
+        
+        if (newPin) {
+            currentPin = newPin;
+            if (newPinInput) newPinInput.value = '';
+        }
         
         const msg = document.getElementById('settings-save-msg');
         msg.classList.remove('hidden');
         setTimeout(() => msg.classList.add('hidden'), 3000);
     } catch (e) {
         console.error('Failed to save settings', e);
+        alert('Failed to save: ' + e.message);
     }
 }
 

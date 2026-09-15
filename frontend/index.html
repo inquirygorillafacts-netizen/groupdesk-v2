@@ -151,7 +151,7 @@
                 <div class="border-b flex gap-4 mb-4">
                     <button class="pb-2 border-b-2 border-brand-primary text-brand-primary font-medium" id="tab-qr" onclick="switchTab('qr')">WhatsApp QR</button>
                     <button class="pb-2 border-b-2 border-transparent text-slate-500 font-medium" id="tab-groups" onclick="switchTab('groups')">Groups Setup</button>
-                    <button class="pb-2 border-b-2 border-transparent text-slate-500 font-medium" id="tab-auto-delete" onclick="switchTab('auto-delete')">Auto Delete</button>
+                    <button class="pb-2 border-b-2 border-transparent text-slate-500 font-medium" id="tab-auto-delete" onclick="switchTab('auto-delete')">Security & Data</button>
                 </div>
 
                 <div id="content-qr">
@@ -178,9 +178,9 @@
                     </div>
                 </div>
 
-                <!-- Auto Delete Content -->
-                <div id="content-auto-delete" class="hidden flex flex-col h-full">
-                    <p class="text-sm text-slate-500 mb-6">Automatically delete old messages and media to save space.</p>
+                <!-- Auto Delete & Security Content -->
+                <div id="content-auto-delete" class="hidden flex flex-col h-full overflow-y-auto pr-2 -mr-2 pb-6">
+                    <p class="text-sm text-slate-500 mb-6">Manage data retention and app security.</p>
                     
                     <div class="space-y-6">
                         <!-- Toggle -->
@@ -206,7 +206,14 @@
                             <p class="mt-2 text-xs text-slate-500">Min 15 days, Max 90 days. <span class="text-red-500 font-medium">&lt; 30 days is risky.</span></p>
                         </div>
                         
-                        <button onclick="saveSettings()" class="w-full py-2.5 bg-brand-primary text-white rounded-md font-medium hover:bg-emerald-600 transition shadow-sm">Save Settings</button>
+                        <!-- Change PIN -->
+                        <div class="pt-4 border-t border-slate-200 mt-4">
+                            <label class="block text-sm font-medium text-slate-700 mb-2">Change Admin PIN (Optional)</label>
+                            <input type="text" id="new-admin-pin" placeholder="Enter new PIN" class="w-full border border-slate-200 rounded-md shadow-sm p-2 focus:border-brand-primary focus:ring-brand-primary sm:text-sm">
+                            <p class="mt-2 text-xs text-slate-500">Leave blank if you don't want to change it.</p>
+                        </div>
+                        
+                        <button onclick="saveSettings()" class="w-full py-2.5 bg-brand-primary text-white rounded-md font-medium hover:bg-emerald-600 transition shadow-sm mt-4">Save Settings</button>
                         <p id="settings-save-msg" class="text-xs text-center text-emerald-600 hidden mt-1 font-medium">Settings saved successfully!</p>
                     </div>
                 </div>

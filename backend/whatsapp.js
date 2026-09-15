@@ -7,7 +7,7 @@ const { useSupabaseAuthState } = require('./supabaseAuth');
 const { io } = require('./server'); // Import io for real-time updates
 
 let sock;
-let isConnected = false;
+let connectionState = 'disconnected'; // 'connected', 'disconnected', 'connecting'
 let currentQr = null;
 let activeGroupJids = [];
 
@@ -32,8 +32,11 @@ async function startWhatsApp() {
             io.emit('qr-code', qr);
         }
 
-        if (connection === 'close') {
-            isConnected = false;
+        if (connection === 'connecting') {
+            connectionState = 'connecting';
+            io.emit('wa-status', 'connecting');
+        } else if (connection === 'close') {
+            connectionState = 'disconnected';
             currentQr = null;
             activeGroupJids = [];
             const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
@@ -47,7 +50,7 @@ async function startWhatsApp() {
                 console.log('Logged out. Deleted auth info from Supabase.');
             }
         } else if (connection === 'open') {
-            isConnected = true;
+            connectionState = 'connected';
             console.log('✅ WhatsApp Connected!');
             io.emit('wa-status', 'connected');
             syncGroups();
@@ -291,7 +294,7 @@ async function sendMessage(groupId, text, type = 'text', mediaUrl = null, quoted
                     id: quotedMsg.id,
                     remoteJid: groupId,
                     fromMe: quotedMsg.direction === 'out',
-                    participant: quotedMsg.direction === 'in' ? quotedMsg.sender_id : undefined
+                    participant: quotedMsg.direction === 'in' ? quotedMsg.sender_id : sock.user.id.split(':')[0] + '@s.whatsapp.net'
                 },
                 message: {
                     conversation: quotedMsg.text || 'Media'
@@ -344,7 +347,7 @@ async function sendMessage(groupId, text, type = 'text', mediaUrl = null, quoted
 async function logoutWhatsApp() {
     if (sock) {
         await sock.logout();
-        isConnected = false;
+        connectionState = 'disconnected';
         activeGroupJids = [];
         io.emit('wa-status', 'disconnected');
     }
@@ -364,4 +367,4 @@ async function forceGenerateQr() {
     await startWhatsApp();
 }
 
-module.exports = { startWhatsApp, syncGroups, sendMessage, logoutWhatsApp, forceGenerateQr, getStatus: () => isConnected, getQr: () => currentQr, getActiveGroupJids: () => activeGroupJids, getSock: () => sock };
+module.exports = { startWhatsApp, syncGroups, sendMessage, logoutWhatsApp, forceGenerateQr, getStatus: () => connectionState, getQr: () => currentQr, getActiveGroupJids: () => activeGroupJids, getSock: () => sock };

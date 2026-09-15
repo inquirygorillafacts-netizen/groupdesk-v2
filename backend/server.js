@@ -121,6 +121,7 @@ app.post('/api/messages/react', async (req, res) => {
         
         const { data: updatedMsg } = await supabase.from('messages').select('*').eq('id', messageId).single();
         io.to(groupId).emit('new-message', updatedMsg);
+        io.to(groupId).emit('reaction-updated', { messageId, reaction });
         
         res.json({ success: true });
     } catch (e) {
@@ -129,11 +130,16 @@ app.post('/api/messages/react', async (req, res) => {
     }
 });
 
-// Admin PIN Verification
-const ADMIN_PIN = process.env.ADMIN_PIN || '1234';
-app.post('/api/admin/verify', (req, res) => {
+// Helper to get Admin PIN
+async function getAdminPin() {
+    const { data } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+    return data?.admin_pin || '1234';
+}
+
+app.post('/api/admin/verify', async (req, res) => {
     const { pin } = req.body;
-    if (pin === ADMIN_PIN) {
+    const currentPin = await getAdminPin();
+    if (pin === currentPin) {
         res.json({ valid: true });
     } else {
         res.status(401).json({ valid: false, error: 'Invalid PIN' });
@@ -142,7 +148,8 @@ app.post('/api/admin/verify', (req, res) => {
 
 app.post('/api/admin/toggle-group', async (req, res) => {
     const { pin, groupId, enabled } = req.body;
-    if (pin !== ADMIN_PIN) return res.status(401).json({ error: 'Unauthorized' });
+    const currentPin = await getAdminPin();
+    if (pin !== currentPin) return res.status(401).json({ error: 'Unauthorized' });
     
     try {
         const { data: group, error } = await supabase
@@ -163,13 +170,19 @@ app.post('/api/admin/toggle-group', async (req, res) => {
 
 // App Settings APIs
 app.post('/api/admin/settings', async (req, res) => {
-    const { pin, auto_delete_enabled, auto_delete_days } = req.body;
-    if (pin !== ADMIN_PIN) return res.status(401).json({ error: 'Unauthorized' });
+    const { pin, auto_delete_enabled, auto_delete_days, new_admin_pin } = req.body;
+    const currentPin = await getAdminPin();
+    if (pin !== currentPin) return res.status(401).json({ error: 'Unauthorized' });
     
     try {
+        const updateData = { id: 1, auto_delete_enabled, auto_delete_days };
+        if (new_admin_pin) {
+            updateData.admin_pin = new_admin_pin;
+        }
+        
         const { data: settings, error } = await supabase
             .from('app_settings')
-            .upsert({ id: 1, auto_delete_enabled, auto_delete_days })
+            .upsert(updateData)
             .select()
             .single();
             

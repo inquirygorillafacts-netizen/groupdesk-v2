@@ -10,10 +10,11 @@ async function setupSettings() {
         console.log("Setting up app_settings table...");
 
         const sql = `
-            CREATE TABLE IF NOT EXISTS app_settings (
-                id int PRIMARY KEY DEFAULT 1,
-                auto_delete_enabled boolean DEFAULT false,
-                auto_delete_days int DEFAULT 60
+            create table if not exists app_settings (
+                id int primary key,
+                auto_delete_enabled boolean default false,
+                auto_delete_days int default 60,
+                admin_pin varchar(20) default '1234'
             );
             
             -- Insert default row if not exists
