@@ -416,7 +416,8 @@ function updateQrUi(initialQr = null) {
                 <div class="flex flex-col items-center justify-center p-6 text-center">
                     <i data-lucide="loader-2" class="w-10 h-10 text-brand-primary animate-spin mb-4"></i>
                     <h3 class="text-lg font-bold text-slate-700 mb-1">Connecting...</h3>
-                    <p class="text-sm text-slate-500">GroupDesk is linking to your WhatsApp.</p>
+                    <p class="text-sm text-slate-500 mb-4">GroupDesk is linking to your WhatsApp. This might take a few moments.</p>
+                    <button onclick="generateQr()" class="text-[12px] px-3 py-1 bg-red-50 text-red-600 rounded border border-red-100 hover:bg-red-100 transition-colors">Force Reset & New QR</button>
                 </div>
             `;
             lucide.createIcons();
