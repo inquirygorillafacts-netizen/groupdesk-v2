@@ -53,7 +53,10 @@ async function startWhatsApp() {
             console.log('Connection closed due to', lastDisconnect.error, ', reconnecting:', shouldReconnect);
             io.emit('wa-status', 'disconnected');
             if (shouldReconnect) {
-                startWhatsApp();
+                console.log('⏳ Reconnecting in 5 seconds to prevent rate limits...');
+                setTimeout(() => {
+                    startWhatsApp();
+                }, 5000);
             } else {
                 // If logged out, delete auth state from Supabase
                 const sessionId = process.env.SESSION_ID || 'default';
