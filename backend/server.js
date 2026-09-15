@@ -23,6 +23,17 @@ app.use(express.static(path.join(__dirname, '../frontend')));
 app.use(express.json());
 app.use(cors());
 
+// Socket.io connection handling
+io.on('connection', (socket) => {
+    socket.on('join-group', (groupId) => {
+        // Leave previous rooms
+        Array.from(socket.rooms).forEach(room => {
+            if (room !== socket.id) socket.leave(room);
+        });
+        socket.join(groupId);
+    });
+});
+
 // File upload setup - Memory Storage for Supabase
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
@@ -49,17 +60,38 @@ app.get('/api/groups', async (req, res) => {
     }
 });
 
+app.post('/api/groups/:groupId/read', async (req, res) => {
+    try {
+        const { error } = await supabase.from('groups').update({ unread: 0 }).eq('id', req.params.groupId);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/messages/:groupId', async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
         const offset = parseInt(req.query.offset) || 0;
+        const after = req.query.after;
         
-        const { data: messages, error } = await supabase
+        let query = supabase
             .from('messages')
             .select('*')
             .eq('group_id', req.params.groupId)
-            .order('created_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+            .order('created_at', { ascending: false });
+            
+        if (after) {
+            // Delta sync: fetch everything newer than the last timestamp
+            // We still order descending so we can just reverse it later like normal
+            query = query.gt('created_at', after);
+        } else {
+            // Standard pagination
+            query = query.range(offset, offset + limit - 1);
+        }
+            
+        const { data: messages, error } = await query;
             
         if (error) throw error;
         

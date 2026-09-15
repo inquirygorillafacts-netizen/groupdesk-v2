@@ -12,7 +12,8 @@ let currentQr = null;
 let activeGroupJids = [];
 
 async function startWhatsApp() {
-    const { state, saveCreds } = await useSupabaseAuthState(supabase, 'default');
+    const sessionId = process.env.SESSION_ID || 'default';
+    const { state, saveCreds } = await useSupabaseAuthState(supabase, sessionId);
     
     sock = makeWASocket({
         auth: state,
@@ -36,6 +37,15 @@ async function startWhatsApp() {
             connectionState = 'connecting';
             io.emit('wa-status', 'connecting');
         } else if (connection === 'close') {
+            const isConflict = lastDisconnect.error?.output?.statusCode === 440 || lastDisconnect.error?.message?.includes('conflict');
+            
+            if (isConflict) {
+                connectionState = 'conflict';
+                io.emit('wa-status', 'conflict');
+                console.log('🚨 WhatsApp Conflict: Another instance is running! Not reconnecting automatically to prevent infinite loop.');
+                return; // Stop the loop
+            }
+
             connectionState = 'disconnected';
             currentQr = null;
             activeGroupJids = [];
@@ -46,7 +56,8 @@ async function startWhatsApp() {
                 startWhatsApp();
             } else {
                 // If logged out, delete auth state from Supabase
-                await supabase.from('auth_state').delete().eq('session_id', 'default');
+                const sessionId = process.env.SESSION_ID || 'default';
+                await supabase.from('auth_state').delete().eq('session_id', sessionId);
                 console.log('Logged out. Deleted auth info from Supabase.');
             }
         } else if (connection === 'open') {

@@ -3,14 +3,142 @@ const socket = io();
 let activeGroupId = null;
 let currentPin = '';
 let groups = [];
-let pendingFile = null;
+let pendingFiles = [];
 let currentMessageOffset = 0;
+let isRecording = false;
+
+// ==========================================
+// IndexedDB for Media Drafts
+// ==========================================
+const dbName = 'GroupDeskDrafts';
+let draftDb;
+const request = indexedDB.open(dbName, 1);
+request.onupgradeneeded = (e) => {
+    draftDb = e.target.result;
+    if (!draftDb.objectStoreNames.contains('mediaDrafts')) {
+        draftDb.createObjectStore('mediaDrafts');
+    }
+};
+request.onsuccess = (e) => draftDb = e.target.result;
+
+async function saveMediaDraft(groupId) {
+    if (!draftDb || !groupId) return;
+    const tx = draftDb.transaction('mediaDrafts', 'readwrite');
+    const store = tx.objectStore('mediaDrafts');
+    
+    if (pendingFiles.length === 0) {
+        store.delete(groupId);
+        return;
+    }
+
+    const filesToSave = pendingFiles.map(f => {
+        return { name: f.name, type: f.type, blob: f, customCaption: f.customCaption };
+    });
+    
+    store.put(filesToSave, groupId);
+}
+
+async function loadMediaDraft(groupId) {
+    if (!draftDb || !groupId) return [];
+    return new Promise((resolve) => {
+        const tx = draftDb.transaction('mediaDrafts', 'readonly');
+        const store = tx.objectStore('mediaDrafts');
+        const req = store.get(groupId);
+        req.onsuccess = () => {
+            const data = req.result;
+            if (data && data.length > 0) {
+                const loaded = data.map(d => {
+                    const f = new File([d.blob], d.name, { type: d.type });
+                    f.customCaption = d.customCaption || '';
+                    f.previewUrl = URL.createObjectURL(f);
+                    return f;
+                });
+                resolve(loaded);
+            } else {
+                resolve([]);
+            }
+        };
+        req.onerror = () => resolve([]);
+    });
+}
+// ==========================================
+// IndexedDB for Offline Messages Cache
+// ==========================================
+const msgDbName = 'GroupDeskMessages';
+let msgDb;
+const msgReq = indexedDB.open(msgDbName, 1);
+msgReq.onupgradeneeded = (e) => {
+    msgDb = e.target.result;
+    if (!msgDb.objectStoreNames.contains('messages')) {
+        const store = msgDb.createObjectStore('messages', { keyPath: 'id' });
+        store.createIndex('group_id', 'group_id', { unique: false });
+        store.createIndex('created_at', 'created_at', { unique: false });
+    }
+};
+msgReq.onsuccess = (e) => msgDb = e.target.result;
+
+async function saveMessagesToDb(messagesArray) {
+    if (!msgDb || !messagesArray || messagesArray.length === 0) return;
+    return new Promise((resolve, reject) => {
+        const tx = msgDb.transaction('messages', 'readwrite');
+        const store = tx.objectStore('messages');
+        messagesArray.forEach(msg => store.put(msg));
+        tx.oncomplete = () => resolve();
+        tx.onerror = (e) => reject(e);
+    });
+}
+
+async function loadMessagesFromDb(groupId, limit = 50) {
+    if (!msgDb || !groupId) return [];
+    return new Promise((resolve) => {
+        const tx = msgDb.transaction('messages', 'readonly');
+        const store = tx.objectStore('messages');
+        const index = store.index('group_id');
+        const request = index.getAll(groupId);
+        
+        request.onsuccess = () => {
+            let messages = request.result || [];
+            messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            if (messages.length > limit) {
+                messages = messages.slice(messages.length - limit);
+            }
+            resolve(messages);
+        };
+        request.onerror = () => resolve([]);
+    });
+}
+// ==========================================
+
 let isLoadingMore = false;
 let hasMoreMessages = true;
+let activePreviewIndex = 0;
+let searchQuery = '';
+const chatCache = {}; // Client-side cache for lightning fast switching
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchWaStatus(); // Check and sync header status immediately
     fetchGroups();
+    
+    // Group Search Logic
+    const searchInput = document.getElementById('search-groups');
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            searchQuery = e.target.value.toLowerCase().trim();
+            renderSidebar();
+        });
+    }
+    
+    // Clear unread if user switches back to tab while active group is open
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && activeGroupId) {
+            const g = groups.find(x => x.id === activeGroupId);
+            if (g && g.unread > 0) {
+                g.unread = 0;
+                fetch(`/api/groups/${activeGroupId}/read`, { method: 'POST' }).catch(console.error);
+                renderSidebar();
+            }
+        }
+    });
     
     const msgInput = document.getElementById('message-input');
     
@@ -48,6 +176,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 sendMessage();
             }
         });
+        
+        // Save draft text
+        msgInput.addEventListener('input', (e) => {
+            if (activeGroupId) {
+                localStorage.setItem(`draft_${activeGroupId}`, e.target.value);
+            }
+        });
+    }
+
+    const captionInput = document.getElementById('media-caption');
+    if (captionInput) {
+        captionInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
     }
 
     // File Input Setup
@@ -55,11 +200,118 @@ document.addEventListener('DOMContentLoaded', () => {
     if (fileInput) {
         fileInput.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
-                pendingFile = e.target.files[0];
-                showMediaPreview(pendingFile);
+                pendingFiles = Array.from(e.target.files).map(f => {
+                    f.customCaption = '';
+                    f.previewUrl = URL.createObjectURL(f);
+                    return f;
+                });
+                activePreviewIndex = 0;
+                showMediaPreview();
             }
         });
     }
+
+    const fsAddInput = document.getElementById('fs-add-file');
+    if (fsAddInput) {
+        fsAddInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                const newFiles = Array.from(e.target.files).map(f => {
+                    f.customCaption = '';
+                    f.previewUrl = URL.createObjectURL(f);
+                    return f;
+                });
+                pendingFiles = pendingFiles.concat(newFiles);
+                activePreviewIndex = pendingFiles.length - newFiles.length; // Set to first newly added file
+                showMediaPreview();
+            }
+        });
+    }
+
+    const fsCaptionInput = document.getElementById('fs-media-caption');
+    if (fsCaptionInput) {
+        fsCaptionInput.addEventListener('input', (e) => {
+            if (pendingFiles[activePreviewIndex]) {
+                pendingFiles[activePreviewIndex].customCaption = e.target.value;
+                saveMediaDraft(activeGroupId);
+            }
+        });
+        fsCaptionInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendMediaFromEditor();
+            }
+        });
+    }
+
+    // =========================================================================
+    // Drag & Drop and Paste Handlers
+    // These functions allow users to paste or drag-and-drop media directly into the chat
+    // =========================================================================
+
+    // Helper function to handle new files and open the media editor
+    function handleFilesAdded(fileList) {
+        if (!fileList || fileList.length === 0) return;
+        
+        // Convert FileList to Array and attach our custom properties
+        const newFiles = Array.from(fileList).map(f => {
+            f.customCaption = '';
+            f.previewUrl = URL.createObjectURL(f);
+            return f;
+        });
+
+        // Add them to our global pendingFiles array
+        pendingFiles = pendingFiles.concat(newFiles);
+        saveMediaDraft(activeGroupId);
+        
+        // Set the active preview to the first newly added file
+        activePreviewIndex = pendingFiles.length - newFiles.length;
+        
+        // Open the media editor
+        showMediaPreview();
+    }
+
+    // 1. Paste Event Listener (on the message input box)
+    const msgInputNode = document.getElementById('message-input');
+    if (msgInputNode) {
+        msgInputNode.addEventListener('paste', (e) => {
+            // Check if there are any files in the clipboard (like copied images)
+            if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+                // Prevent the default paste
+                e.preventDefault(); 
+                // Handle the files
+                handleFilesAdded(e.clipboardData.files);
+            }
+            // If it's just text, do nothing and let the browser paste the text normally!
+        });
+    }
+
+    // 2. Drag and Drop Event Listeners (on the entire chat area)
+    const dropZone = document.getElementById('chat-messages');
+    if (dropZone) {
+        // We must prevent default behavior on dragover, otherwise the browser will just open the file!
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('bg-slate-50'); // Slight visual feedback
+        });
+
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('bg-slate-50');
+        });
+
+        // Handle the actual drop
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('bg-slate-50');
+            
+            // Check if files were dropped
+            if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                handleFilesAdded(e.dataTransfer.files);
+            }
+        });
+    }
+    // =========================================================================
+
 });
 
 // Socket Events
@@ -78,6 +330,8 @@ socket.on('wa-status', (status) => {
         }
     } else if (status === 'connecting') {
         el.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 text-amber-500 animate-spin"></i> Connecting...';
+    } else if (status === 'conflict') {
+        el.innerHTML = '<i data-lucide="alert-triangle" class="w-3 h-3 text-red-500"></i> Conflict (Multiple instances)';
     } else {
         el.innerHTML = '<i data-lucide="circle" class="w-2 h-2 text-amber-300 fill-amber-300"></i> Disconnected';
     }
@@ -95,9 +349,32 @@ socket.on('groups-updated', () => {
 });
 
 socket.on('new-message', (msg) => {
-    if (msg.group_id === activeGroupId) {
+    // 💾 Save immediately to local database for offline sync
+    saveMessagesToDb([msg]);
+
+    if (msg.group_id === activeGroupId && !document.hidden) {
+        // If it's a message we sent, remove the oldest optimistic UI bubble instantly
+        if (msg.direction === 'out' || msg.isOut) {
+            const opt = document.querySelector('.optimistic-msg-node');
+            if (opt) opt.remove();
+        }
+        
         appendMessage(msg);
         scrollToBottom();
+    } else {
+        // Increment Unread Badge locally in RAM (since DB is updated via webhook)
+        const g = groups.find(x => x.id === msg.group_id);
+        if (g) g.unread = (g.unread || 0) + 1;
+        renderSidebar();
+        
+        // Play notification sound
+        if (!msg.isOut && msg.direction !== 'out') {
+            try {
+                // Short minimalist blip base64 (tiny 1 second beep)
+                const snd = new Audio('data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq');
+                snd.play().catch(e => console.log('Autoplay prevented', e));
+            } catch(e) {}
+        }
     }
 });
 
@@ -138,6 +415,15 @@ function updateQrUi(initialQr = null) {
                     <i data-lucide="loader-2" class="w-10 h-10 text-brand-primary animate-spin mb-4"></i>
                     <h3 class="text-lg font-bold text-slate-700 mb-1">Connecting...</h3>
                     <p class="text-sm text-slate-500">GroupDesk is linking to your WhatsApp.</p>
+                </div>
+            `;
+            lucide.createIcons();
+        } else if (initialQr === 'conflict') {
+            qrContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center p-6 text-center bg-red-50 border border-red-100 rounded-lg">
+                    <i data-lucide="alert-triangle" class="w-10 h-10 text-red-500 mb-4"></i>
+                    <h3 class="text-lg font-bold text-red-800 mb-1">Conflict Error</h3>
+                    <p class="text-sm text-red-600">WhatsApp is running on another server (e.g. Render). Please close one of them.</p>
                 </div>
             `;
             lucide.createIcons();
@@ -190,13 +476,17 @@ async function fetchWaStatus() {
 
     const res = await fetch('/api/whatsapp/status');
     const data = await res.json();
-    waConnected = data.connected;
+    waConnected = (data.connected === 'connected');
     
     // Sync header status UI
     const el = document.getElementById('connection-status');
     if (el) {
-        if (waConnected) {
+        if (data.connected === 'connected') {
             el.innerHTML = '<i data-lucide="circle" class="w-2 h-2 text-emerald-400 fill-emerald-400"></i> Connected';
+        } else if (data.connected === 'connecting') {
+            el.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 text-amber-500 animate-spin"></i> Connecting...';
+        } else if (data.connected === 'conflict') {
+            el.innerHTML = '<i data-lucide="alert-triangle" class="w-3 h-3 text-red-500"></i> Conflict (Multiple instances)';
         } else {
             el.innerHTML = '<i data-lucide="circle" class="w-2 h-2 text-amber-300 fill-amber-300"></i> Disconnected';
         }
@@ -241,15 +531,37 @@ async function fetchGroups() {
     groups = await res.json();
     renderSidebar();
     renderAdminGroups();
+    
+    // Auto-select from localStorage on initial load
+    if (!activeGroupId) {
+        const savedId = localStorage.getItem('activeGroupId');
+        if (savedId) {
+            const savedGroup = groups.find(g => g.id === savedId && g.enabled);
+            if (savedGroup) {
+                selectGroup(savedGroup);
+            }
+        }
+    }
 }
 
 function renderSidebar() {
     const list = document.getElementById('groups-list');
     list.innerHTML = '';
     
-    const visible = groups.filter(g => g.enabled);
+    let visible = groups.filter(g => g.enabled);
+    
+    if (searchQuery) {
+        visible = visible.filter(g => g.name.toLowerCase().includes(searchQuery));
+        // Sort: most relevant (exact match or starts with) at the top
+        visible.sort((a, b) => {
+            const aStarts = a.name.toLowerCase().startsWith(searchQuery) ? -1 : 0;
+            const bStarts = b.name.toLowerCase().startsWith(searchQuery) ? -1 : 0;
+            return aStarts - bStarts;
+        });
+    }
+
     if (visible.length === 0) {
-        list.innerHTML = '<div class="p-6 text-sm text-slate-500 text-center">No groups enabled by Admin yet.</div>';
+        list.innerHTML = `<div class="p-6 text-sm text-slate-500 text-center">${searchQuery ? 'No groups found.' : 'No groups enabled by Admin yet.'}</div>`;
         return;
     }
 
@@ -260,6 +572,7 @@ function renderSidebar() {
         div.onclick = () => selectGroup(g);
         
         const time = new Date(g.lastAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const unread = g.unread || 0;
         
         div.innerHTML = `
             <div class="w-10 h-10 rounded-full bg-gradient-to-br from-brand-primary to-brand-deep text-white flex items-center justify-center font-semibold shrink-0">${g.name.slice(0,1)}</div>
@@ -270,7 +583,7 @@ function renderSidebar() {
                 </div>
                 <div class="flex justify-between items-center mt-0.5">
                     <div class="text-[12px] text-slate-500 truncate">${g.lastPreview || 'No messages'}</div>
-                    ${g.unread > 0 ? `<span class="px-1.5 py-0.5 rounded-full bg-brand-primary text-white text-[10px]">${g.unread}</span>` : ''}
+                    ${unread > 0 ? `<span class="px-1.5 py-0.5 rounded-full bg-brand-primary text-white text-[10px] shadow-sm">${unread}</span>` : ''}
                 </div>
             </div>
         `;
@@ -280,33 +593,108 @@ function renderSidebar() {
 
 async function selectGroup(group) {
     activeGroupId = group.id;
+    localStorage.setItem('activeGroupId', group.id);
     socket.emit('join-group', group.id);
+    
+    // Clear unread count for this group in DB and UI
+    group.unread = 0;
+    fetch(`/api/groups/${group.id}/read`, { method: 'POST' }).catch(console.error);
+    renderSidebar();
     
     document.getElementById('active-group-header').classList.remove('hidden');
     document.getElementById('chat-input-area').classList.remove('hidden');
     document.getElementById('active-group-name').innerText = group.name;
     document.getElementById('active-group-anon').innerText = `Anonymized · ${group.anon_counter || 0} unknown participants`;
     
+    // Load drafts for this group
+    const savedText = localStorage.getItem(`draft_${group.id}`);
+    if (savedText) {
+        document.getElementById('message-input').value = savedText;
+    }
+    
+    // Load media drafts
+    pendingFiles = await loadMediaDraft(group.id);
+    if (pendingFiles.length > 0) {
+        activePreviewIndex = 0;
+        showMediaPreview();
+    }
+    
     renderSidebar(); // Update active state
     
     currentMessageOffset = 0;
     hasMoreMessages = true;
     isLoadingMore = false;
-    
-    const res = await fetch(`/api/messages/${encodeURIComponent(group.id)}?limit=50&offset=${currentMessageOffset}`);
-    const messages = await res.json();
-    
-    const chatBox = document.getElementById('chat-messages');
+     const chatBox = document.getElementById('chat-messages');
     chatBox.innerHTML = '';
     chatBox.className = 'flex-1 overflow-y-auto p-4 flex flex-col gap-2 chat-bg thin-scroll';
+
+    // ⚡ Lightning Fast UI: Render from local IndexedDB instantly!
+    const localMessages = await loadMessagesFromDb(group.id);
+    if (localMessages.length > 0) {
+        const fragment = document.createDocumentFragment();
+        localMessages.forEach(msg => fragment.appendChild(createMessageWrapper(msg)));
+        chatBox.appendChild(fragment);
+        lucide.createIcons({ root: chatBox });
+        scrollToBottom();
+        
+        // Setup offset based on what we loaded locally
+        currentMessageOffset = localMessages.length;
+    } else {
+        chatBox.innerHTML = '<div class="text-center text-slate-400 mt-10 text-sm">Loading messages...</div>';
+    }
     
-    if (messages.length < 50) hasMoreMessages = false;
+    // 🕒 Sync only NEW messages using the timestamp of the last local message
+    let afterQuery = '';
+    if (localMessages.length > 0) {
+        const lastMsg = localMessages[localMessages.length - 1];
+        afterQuery = `&after=${encodeURIComponent(lastMsg.created_at || lastMsg.timestamp)}`;
+    }
     
-    messages.forEach(msg => chatBox.appendChild(createMessageWrapper(msg)));
-    setTimeout(scrollToBottom, 100);
+    try {
+        const res = await fetch(`/api/messages/${encodeURIComponent(group.id)}?limit=50${afterQuery}`);
+        const newMessages = await res.json();
+        
+        // Race Condition Guard
+        if (activeGroupId !== group.id) return;
+        
+        if (newMessages.length > 0) {
+            // Save new messages to local cache
+            await saveMessagesToDb(newMessages);
+            
+            if (localMessages.length === 0) {
+                chatBox.innerHTML = '';
+            }
+            
+            // Append only the newly synced messages to the UI
+            newMessages.forEach(msg => chatBox.appendChild(createMessageWrapper(msg)));
+            lucide.createIcons({ root: chatBox });
+            scrollToBottom();
+            currentMessageOffset += newMessages.length;
+        } else if (localMessages.length === 0) {
+            chatBox.innerHTML = '<div class="flex items-center justify-center h-full text-slate-400 text-sm">No messages yet.</div>';
+        }
+        
+        if (newMessages.length < 50 && !afterQuery) hasMoreMessages = false;
+        
+    } catch (e) {
+        console.error('Failed to sync messages:', e);
+    }
     
     // Infinite Scroll Logic
     chatBox.onscroll = async () => {
+        // Toggle Scroll to Bottom button
+        const scrollBtn = document.getElementById('scroll-to-bottom-btn');
+        if (scrollBtn) {
+            const distanceFromBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight;
+            if (distanceFromBottom > 300) {
+                scrollBtn.classList.remove('hidden');
+                scrollBtn.classList.add('flex');
+            } else {
+                scrollBtn.classList.add('hidden');
+                scrollBtn.classList.remove('flex');
+            }
+        }
+
         if (chatBox.scrollTop <= 50 && !isLoadingMore && hasMoreMessages) {
             isLoadingMore = true;
             currentMessageOffset += 50;
@@ -318,13 +706,16 @@ async function selectGroup(group) {
             
             if (moreMessages.length < 50) hasMoreMessages = false;
             
-            // moreMessages is oldest first, we need to insert them at the top.
-            // Best way is to create a document fragment and insert it.
             if (moreMessages.length > 0) {
+                // Save historical messages to cache too
+                saveMessagesToDb(moreMessages);
+                
                 const fragment = document.createDocumentFragment();
                 moreMessages.forEach(msg => fragment.appendChild(createMessageWrapper(msg)));
                 chatBox.insertBefore(fragment, chatBox.firstChild);
+                lucide.createIcons({ root: chatBox });
                 
+                currentMessageOffset += moreMessages.length;
                 chatBox.scrollTop = chatBox.scrollHeight - oldScrollHeight;
             }
             isLoadingMore = false;
@@ -335,13 +726,60 @@ async function selectGroup(group) {
 function appendMessage(msg) {
     const chatBox = document.getElementById('chat-messages');
     
+    const wrapper = createMessageWrapper(msg);
     const existing = document.getElementById('msg-node-' + msg.id);
     if (existing) {
-        existing.replaceWith(createMessageWrapper(msg));
+        existing.replaceWith(wrapper);
     } else {
-        chatBox.appendChild(createMessageWrapper(msg));
+        chatBox.appendChild(wrapper);
     }
-    lucide.createIcons();
+    // Only parse icons in the newly added wrapper to prevent massive lag!
+    lucide.createIcons({ root: wrapper });
+}
+
+function formatTextWithLinks(text, isOut) {
+    if (!text) return '';
+    const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const linkClass = isOut ? "text-white underline font-semibold hover:text-white/80" : "text-blue-600 underline font-semibold hover:text-blue-800";
+    return escapedText.replace(urlRegex, `<a href="$1" target="_blank" class="${linkClass}">$1</a>`);
+}
+
+async function forceDownload(url) {
+    try {
+        const res = await fetch(url);
+        const blob = await res.blob();
+        const objectUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = url.substring(url.lastIndexOf('/') + 1) || 'download';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(objectUrl);
+        a.remove();
+    } catch (e) {
+        console.error('Download failed, falling back to new tab', e);
+        window.open(url, '_blank');
+    }
+}
+
+function showToast(message) {
+    const toast = document.createElement('div');
+    toast.className = 'fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-4 py-2 rounded-full shadow-lg text-sm z-50 transition-opacity duration-300 pointer-events-none';
+    toast.innerText = message;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('opacity-0');
+        setTimeout(() => toast.remove(), 300);
+    }, 2000);
+}
+
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('Link copied to clipboard!');
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+    });
 }
 
 function createMessageWrapper(msg) {
@@ -368,30 +806,55 @@ function createMessageWrapper(msg) {
     let mediaHtml = '';
     const mediaUrl = msg.media_url || msg.mediaUrl;
     if (mediaUrl) {
+        const actionsHtml = `
+        <div class="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+            <button onclick="forceDownload('${mediaUrl}')" class="bg-black/40 hover:bg-black/60 backdrop-blur-sm text-white p-2 rounded-full shadow-sm transition-colors" title="Download">
+                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+            </button>
+            <button onclick="copyToClipboard('${mediaUrl}')" class="bg-black/40 hover:bg-black/60 backdrop-blur-sm text-white p-2 rounded-full shadow-sm transition-colors" title="Copy Link">
+                <i data-lucide="link" class="w-3.5 h-3.5"></i>
+            </button>
+            <a href="${mediaUrl}" target="_blank" class="bg-black/40 hover:bg-black/60 backdrop-blur-sm text-white p-2 rounded-full shadow-sm transition-colors flex items-center justify-center" title="Open in New Tab">
+                <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+            </a>
+        </div>`;
+
         if (msg.type === 'image') {
-            mediaHtml = `<img src="${mediaUrl}" onclick="openFullscreen('${mediaUrl}', 'image')" class="rounded-lg max-h-64 object-cover cursor-pointer my-1 w-full" />`;
+            mediaHtml = `
+            <div class="relative group my-1">
+                <img src="${mediaUrl}" onclick="openFullscreen('${mediaUrl}', 'image')" class="rounded-lg max-h-64 object-cover cursor-pointer w-full" />
+                ${actionsHtml}
+            </div>`;
         } else if (msg.type === 'video') {
             mediaHtml = `
-            <div class="relative group my-1 cursor-pointer bg-black/10 rounded-lg overflow-hidden flex items-center justify-center max-h-64" onclick="openFullscreen('${mediaUrl}', 'video')">
-                <video src="${mediaUrl}#t=0.001" preload="metadata" class="w-full h-full object-cover max-h-64 pointer-events-none"></video>
-                <div class="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20 group-hover:bg-black/30 transition-colors">
-                    <div class="w-12 h-12 bg-black/60 rounded-full flex items-center justify-center backdrop-blur-md">
-                        <i data-lucide="play" class="w-5 h-5 text-white ml-1"></i>
+            <div class="relative group my-1 cursor-pointer bg-black/10 rounded-lg overflow-hidden max-h-64">
+                <div class="flex items-center justify-center h-full" onclick="openFullscreen('${mediaUrl}', 'video')">
+                    <video src="${mediaUrl}#t=0.001" preload="metadata" class="w-full h-full object-cover max-h-64 pointer-events-none"></video>
+                    <div class="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20 group-hover:bg-black/30 transition-colors">
+                        <div class="w-12 h-12 bg-black/60 rounded-full flex items-center justify-center backdrop-blur-md">
+                            <i data-lucide="play" class="w-5 h-5 text-white ml-1"></i>
+                        </div>
                     </div>
                 </div>
+                ${actionsHtml}
             </div>`;
         } else if (msg.type === 'audio') {
             mediaHtml = `<audio src="${mediaUrl}" controls class="w-full max-w-[260px] h-10 my-1"></audio>`;
         } else {
             mediaHtml = `
-            <a href="${mediaUrl}" download class="flex items-center gap-3 p-3 rounded-xl border transition-colors max-w-sm my-1 ${isOut ? 'bg-white/10 border-white/20 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}">
+            <div class="flex items-center gap-3 p-3 rounded-xl border max-w-sm my-1 ${isOut ? 'bg-white/10 border-white/20 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}">
                 <div class="w-10 h-10 shrink-0 rounded-lg flex items-center justify-center ${isOut ? 'bg-white/20' : 'bg-emerald-100 text-emerald-600'}">
                     <i data-lucide="file-text" class="w-5 h-5"></i>
                 </div>
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium truncate">${msg.text || 'Document'}</div>
                 </div>
-            </a>`;
+                <div class="flex items-center gap-1 shrink-0 ml-2">
+                    <button onclick="forceDownload('${mediaUrl}')" class="p-1.5 opacity-70 hover:opacity-100" title="Download"><i data-lucide="download" class="w-4 h-4"></i></button>
+                    <button onclick="copyToClipboard('${mediaUrl}')" class="p-1.5 opacity-70 hover:opacity-100" title="Copy Link"><i data-lucide="link" class="w-4 h-4"></i></button>
+                    <a href="${mediaUrl}" target="_blank" class="p-1.5 opacity-70 hover:opacity-100" title="Open in New Tab"><i data-lucide="external-link" class="w-4 h-4"></i></a>
+                </div>
+            </div>`;
         }
     }
 
@@ -407,7 +870,7 @@ function createMessageWrapper(msg) {
         `;
     }
 
-    const textHtml = (msg.text && msg.type !== 'document') ? `<div class="text-[14px] leading-snug whitespace-pre-wrap break-words mt-1">${msg.text}</div>` : '';
+    const textHtml = (msg.text && msg.type !== 'document') ? `<div class="text-[14px] leading-snug whitespace-pre-wrap break-words mt-1">${formatTextWithLinks(msg.text, isOut)}</div>` : '';
 
     // Hover actions
     const hoverHtml = `
@@ -415,7 +878,7 @@ function createMessageWrapper(msg) {
             <button onclick='setReply(${JSON.stringify(msg).replace(/'/g, "&#39;")})' class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="Reply">
                 <i data-lucide="reply" class="w-3.5 h-3.5 text-slate-600"></i>
             </button>
-            ${msg.text ? `<button onclick="navigator.clipboard.writeText('${msg.text.replace(/'/g, "\\'")}'); alert('Copied')" class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="Copy"><i data-lucide="copy" class="w-3.5 h-3.5 text-slate-600"></i></button>` : ''}
+            ${msg.text ? `<button onclick="navigator.clipboard.writeText('${msg.text.replace(/'/g, "\\'")}'); showToast('Text copied!')" class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="Copy"><i data-lucide="copy" class="w-3.5 h-3.5 text-slate-600"></i></button>` : ''}
             
             <div class="relative group/react inline-block">
                 <button class="p-1.5 rounded-full bg-white border shadow-sm hover:bg-slate-50 transition-colors" title="React">
@@ -438,7 +901,7 @@ function createMessageWrapper(msg) {
     // Reactions HTML
     let reactionsHtml = '';
     if (msg.reactions && Object.keys(msg.reactions).length > 0) {
-        const reacts = Object.values(msg.reactions).join(' ');
+        const reacts = Object.keys(msg.reactions).join(' ');
         reactionsHtml = `<div class="absolute -bottom-3 ${isOut ? 'right-2' : 'left-2'} bg-white border shadow-sm rounded-full px-1.5 py-0.5 flex items-center gap-1 text-[11px] z-10">${reacts}</div>`;
     }
 
@@ -485,65 +948,223 @@ function searchMessages(query) {
 function scrollToBottom() {
     const box = document.getElementById('chat-messages');
     box.scrollTop = box.scrollHeight;
+    const btn = document.getElementById('scroll-to-bottom-btn');
+    if (btn) {
+        btn.classList.add('hidden');
+        btn.classList.remove('flex');
+    }
 }
 
 // Media Preview & Sending Logic
-function showMediaPreview(file) {
-    const container = document.getElementById('media-preview-container');
-    const content = document.getElementById('media-preview-content');
-    container.classList.remove('hidden');
+function showMediaPreview() {
+    const editor = document.getElementById('fullscreen-media-editor');
+    const strip = document.getElementById('fs-thumbnail-strip');
+    const mainPreview = document.getElementById('fs-main-preview');
+    const captionInput = document.getElementById('fs-media-caption');
     
-    const url = URL.createObjectURL(file);
-    if (file.type.startsWith('image/')) {
-        content.innerHTML = `<img src="${url}" class="w-full h-full object-cover" />`;
-    } else if (file.type.startsWith('video/')) {
-        content.innerHTML = `<video src="${url}" class="w-full h-full object-cover"></video>`;
-    } else {
-        content.innerHTML = `<i data-lucide="file" class="w-10 h-10 text-slate-400"></i>`;
+    if (pendingFiles.length === 0) {
+        closeMediaPreview();
+        return;
     }
+    
+    // Ensure index is valid
+    if (activePreviewIndex >= pendingFiles.length) {
+        activePreviewIndex = Math.max(0, pendingFiles.length - 1);
+    }
+    
+    editor.classList.remove('hidden');
+    editor.classList.add('flex');
+    document.getElementById('chat-messages').classList.add('hidden');
+    document.getElementById('chat-input-area').classList.add('hidden');
+    
+    strip.innerHTML = '';
+    
+    const activeFile = pendingFiles[activePreviewIndex];
+    
+    // Main preview
+    if (activeFile.type.startsWith('image/')) {
+        mainPreview.innerHTML = `<img src="${activeFile.previewUrl}" class="max-w-full max-h-full object-contain rounded-md shadow-lg" />`;
+    } else if (activeFile.type.startsWith('video/')) {
+        mainPreview.innerHTML = `<video src="${activeFile.previewUrl}" controls class="max-w-full max-h-full object-contain rounded-md shadow-lg"></video>`;
+    } else {
+        mainPreview.innerHTML = `<div class="bg-white p-10 rounded-xl shadow-lg flex flex-col items-center gap-4"><i data-lucide="file" class="w-20 h-20 text-slate-400"></i><span class="font-medium text-slate-700">${activeFile.name}</span></div>`;
+    }
+    
+    captionInput.value = activeFile.customCaption || '';
+    captionInput.focus();
+    
+    // Thumbnails
+    pendingFiles.forEach((file, index) => {
+        const wrap = document.createElement('div');
+        const isActive = index === activePreviewIndex;
+        wrap.className = `relative w-16 h-16 shrink-0 rounded-md flex items-center justify-center overflow-hidden group cursor-pointer transition-all border-2 ${isActive ? 'border-brand-primary scale-110 shadow-md' : 'border-transparent opacity-70 hover:opacity-100'}`;
+        wrap.onclick = () => {
+            activePreviewIndex = index;
+            showMediaPreview();
+        };
+        
+        let mediaHtml = '';
+        if (file.type.startsWith('image/')) {
+            mediaHtml = `<img src="${file.previewUrl}" class="w-full h-full object-cover" />`;
+        } else if (file.type.startsWith('video/')) {
+            mediaHtml = `<video src="${file.previewUrl}" class="w-full h-full object-cover"></video>`;
+        } else {
+            mediaHtml = `<div class="bg-slate-200 w-full h-full flex items-center justify-center"><i data-lucide="file" class="w-6 h-6 text-slate-400"></i></div>`;
+        }
+        
+        wrap.innerHTML = `
+            ${mediaHtml}
+            <button onclick="event.stopPropagation(); removePendingFile(${index})" class="absolute top-0.5 right-0.5 bg-red-500 hover:bg-red-600 text-white p-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                <i data-lucide="x" class="w-3 h-3"></i>
+            </button>
+        `;
+        strip.appendChild(wrap);
+    });
+    
     lucide.createIcons();
 }
 
+function removePendingFile(index) {
+    pendingFiles.splice(index, 1);
+    saveMediaDraft(activeGroupId);
+    
+    if (pendingFiles.length === 0) {
+        closeMediaPreview();
+    } else {
+        if (activePreviewIndex >= pendingFiles.length) {
+            activePreviewIndex = pendingFiles.length - 1;
+        }
+        showMediaPreview();
+    }
+}
+
 function closeMediaPreview() {
-    document.getElementById('media-preview-container').classList.add('hidden');
+    document.getElementById('fullscreen-media-editor').classList.add('hidden');
+    document.getElementById('fullscreen-media-editor').classList.remove('flex');
+    document.getElementById('chat-messages').classList.remove('hidden');
+    document.getElementById('chat-input-area').classList.remove('hidden');
+    
     document.getElementById('file-input').value = '';
-    document.getElementById('media-caption').value = '';
-    pendingFile = null;
+    document.getElementById('fs-add-file').value = '';
+    document.getElementById('fs-media-caption').value = '';
+    pendingFiles = [];
+    activePreviewIndex = 0;
+    saveMediaDraft(activeGroupId);
+    scrollToBottom();
+}
+
+async function sendMediaFromEditor() {
+    if (pendingFiles.length === 0 || !activeGroupId) return;
+
+    const filesToSend = [...pendingFiles];
+    const replyContext = window.replyMsg ? window.replyMsg.id : null;
+    
+    closeMediaPreview();
+    const chatContainer = document.getElementById('chat-messages');
+    
+    for (let i = 0; i < filesToSend.length; i++) {
+        const file = filesToSend[i];
+        const caption = file.customCaption || '';
+        
+        // Optimistic UI per file
+        let mediaHtml = '';
+        if (file.type.startsWith('image/')) {
+            mediaHtml = `<img src="${file.previewUrl}" class="rounded-lg max-h-64 object-cover my-1 w-full" />`;
+        } else if (file.type.startsWith('video/')) {
+            mediaHtml = `<video src="${file.previewUrl}" class="rounded-lg max-h-64 object-cover my-1 w-full"></video>`;
+        } else {
+            mediaHtml = `<div class="my-1 text-sm italic opacity-90 flex items-center gap-2"><i data-lucide="file" class="w-4 h-4"></i> ${file.name}</div>`;
+        }
+        
+        const optDiv = document.createElement('div');
+        optDiv.className = 'flex justify-end mb-4 animate-pulse opacity-80 optimistic-msg-node';
+        optDiv.innerHTML = `
+            <div class="max-w-[75%] rounded-2xl p-3 shadow-sm bg-emerald-500 text-white rounded-tr-none border border-transparent">
+                <div class="flex items-center gap-2 text-xs opacity-75 mb-1 font-medium">
+                    <span>You</span>
+                    <i data-lucide="clock" class="w-3 h-3"></i> Sending...
+                </div>
+                ${mediaHtml}
+                ${caption ? `<div class="text-[14px] leading-relaxed break-words whitespace-pre-wrap mt-1">${caption}</div>` : ''}
+            </div>
+        `;
+        chatContainer.appendChild(optDiv);
+        lucide.createIcons();
+        scrollToBottom();
+        
+        // Async Upload and Send in background
+        (async () => {
+            let type = 'document';
+            if (file.type.startsWith('image/')) type = 'image';
+            else if (file.type.startsWith('video/')) type = 'video';
+            else if (file.type.startsWith('audio/')) type = 'audio';
+
+            const fd = new FormData();
+            fd.append('file', file);
+            
+            try {
+                const upRes = await fetch('/api/upload', { method: 'POST', body: fd });
+                const upData = await upRes.json();
+                if (upData.error) throw new Error(upData.error);
+                
+                const payload = {
+                    groupId: activeGroupId,
+                    text: caption,
+                    type: type,
+                    media: upData.url
+                };
+
+                if (i === 0 && replyContext) {
+                    payload.quotedMsgId = replyContext;
+                }
+
+                await fetch('/api/messages/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+            } catch (e) {
+                console.error('Upload failed:', e);
+                optDiv.classList.remove('animate-pulse');
+                optDiv.innerHTML = `<div class="text-red-500 text-sm p-2 bg-red-100 rounded">Failed to upload ${file.name}</div>`;
+            }
+        })();
+    }
+    
+    if (window.replyMsg) clearReply();
 }
 
 async function sendMessage() {
     const input = document.getElementById('message-input');
-    const captionInput = document.getElementById('media-caption');
-    const text = pendingFile ? captionInput.value : input.value;
+    const text = input.value;
     
-    if ((!text.trim() && !pendingFile) || !activeGroupId) return;
+    if (!text.trim() || !activeGroupId) return;
 
     input.value = '';
+    localStorage.removeItem(`draft_${activeGroupId}`);
     
-    let type = 'text';
-    let mediaUrl = null;
-
-    if (pendingFile) {
-        if (pendingFile.type.startsWith('image/')) type = 'image';
-        else if (pendingFile.type.startsWith('video/')) type = 'video';
-        else if (pendingFile.type.startsWith('audio/')) type = 'audio';
-        else type = 'document';
-
-        const fd = new FormData();
-        fd.append('file', pendingFile);
-        
-        const upRes = await fetch('/api/upload', { method: 'POST', body: fd });
-        const upData = await upRes.json();
-        mediaUrl = upData.url;
-        
-        closeMediaPreview();
-    }
+    const chatContainer = document.getElementById('chat-messages');
+    const optDiv = document.createElement('div');
+    optDiv.className = 'flex justify-end mb-4 animate-pulse opacity-80 optimistic-msg-node';
+    optDiv.innerHTML = `
+        <div class="max-w-[75%] rounded-2xl p-3 shadow-sm bg-emerald-500 text-white rounded-tr-none border border-transparent">
+            <div class="flex items-center gap-2 text-xs opacity-75 mb-1 font-medium">
+                <span>You</span>
+                <i data-lucide="clock" class="w-3 h-3"></i> Sending...
+            </div>
+            <div class="text-[14px] leading-relaxed break-words whitespace-pre-wrap mt-1">${formatTextWithLinks(text, true)}</div>
+        </div>
+    `;
+    chatContainer.appendChild(optDiv);
+    lucide.createIcons();
+    scrollToBottom();
 
     const payload = {
         groupId: activeGroupId,
         text: text,
-        type: type,
-        media: mediaUrl
+        type: 'text',
+        media: null
     };
 
     if (window.replyMsg) {
@@ -551,11 +1172,18 @@ async function sendMessage() {
         clearReply();
     }
 
-    await fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
+    try {
+        await fetch('/api/messages/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+    } catch(e) {
+        console.error(e);
+        optDiv.classList.remove('animate-pulse');
+        optDiv.innerHTML = `<div class="text-red-500 text-sm p-2 bg-red-100 rounded">Failed to send</div>`;
+    }
 }
 
 function setReply(msg) {

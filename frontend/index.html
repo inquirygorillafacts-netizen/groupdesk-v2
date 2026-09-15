@@ -86,20 +86,48 @@
                 </div>
             </div>
             
-            <div id="chat-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+            <div id="chat-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-2 relative">
                 <div class="flex items-center justify-center h-full text-slate-400 text-sm">Select a group to start messaging.</div>
             </div>
+            
+            <!-- Scroll to Bottom Button -->
+            <button id="scroll-to-bottom-btn" onclick="scrollToBottom()" class="hidden absolute bottom-20 right-6 w-10 h-10 bg-white rounded-full shadow-lg border text-slate-600 flex items-center justify-center hover:bg-slate-50 transition-all z-20 hover:scale-105">
+                <i data-lucide="chevron-down" class="w-5 h-5"></i>
+            </button>
 
-            <!-- Media Preview Block (Hidden by default) -->
-            <div id="media-preview-container" class="hidden absolute bottom-[60px] left-0 w-full bg-white border-t p-4 shadow-lg z-10 flex flex-col">
-                <div class="flex justify-between items-center mb-2">
-                    <span class="text-sm font-semibold text-slate-700">Media Preview</span>
-                    <button onclick="closeMediaPreview()" class="text-slate-500 hover:text-red-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+            <!-- Full-Screen Media Editor (WhatsApp Style) -->
+            <div id="fullscreen-media-editor" class="hidden absolute inset-0 bg-[#efeae2] z-30 flex-col">
+                <!-- Header -->
+                <div class="h-14 bg-[#efeae2] px-4 flex items-center shrink-0">
+                    <button onclick="closeMediaPreview()" class="p-2 text-slate-600 hover:bg-slate-200 rounded-full transition-colors">
+                        <i data-lucide="x" class="w-6 h-6"></i>
+                    </button>
                 </div>
-                <div class="flex gap-4 items-center">
-                    <div id="media-preview-content" class="w-32 h-32 bg-slate-100 rounded-lg flex items-center justify-center overflow-hidden"></div>
-                    <div class="flex-1">
-                        <input type="text" id="media-caption" placeholder="Add a caption..." class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:border-brand-primary">
+                
+                <!-- Main Preview Area -->
+                <div class="flex-1 flex items-center justify-center p-8 min-h-0 relative">
+                    <div id="fs-main-preview" class="w-full h-full flex items-center justify-center overflow-hidden">
+                        <!-- Large image/video injected here -->
+                    </div>
+                </div>
+
+                <!-- Footer / Thumbnail Strip -->
+                <div class="bg-[#efeae2] pb-6 pt-4 px-8 flex flex-col gap-4 shrink-0">
+                    <div class="flex justify-center">
+                        <input type="text" id="fs-media-caption" placeholder="Add a caption..." class="w-full max-w-2xl bg-white border-0 shadow-sm rounded-lg px-4 py-3 outline-none focus:ring-2 focus:ring-brand-primary text-sm">
+                    </div>
+                    
+                    <div class="flex items-center justify-center gap-4">
+                        <div id="fs-thumbnail-strip" class="flex gap-2 overflow-x-auto pb-2 items-center justify-center min-h-[70px]">
+                            <!-- Thumbnails injected here -->
+                        </div>
+                        <label class="w-12 h-12 border-2 border-slate-300 border-dashed rounded-lg flex items-center justify-center cursor-pointer hover:bg-slate-200 transition-colors text-slate-500 shrink-0">
+                            <i data-lucide="plus" class="w-6 h-6"></i>
+                            <input type="file" id="fs-add-file" class="hidden" accept="image/*,video/*,application/pdf,.doc,.docx" multiple>
+                        </label>
+                        <button onclick="sendMediaFromEditor()" class="w-14 h-14 bg-brand-primary text-white rounded-full hover:bg-emerald-600 shadow-md flex items-center justify-center shrink-0 ml-4 transition-transform hover:scale-105">
+                            <i data-lucide="send" class="w-6 h-6 ml-1"></i>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -119,7 +147,7 @@
                 <button class="p-2 text-slate-500 hover:text-brand-primary" id="emoji-btn"><i data-lucide="smile" class="w-5 h-5"></i></button>
                 <label class="p-2 text-slate-500 hover:text-brand-primary cursor-pointer">
                     <i data-lucide="paperclip" class="w-5 h-5"></i>
-                    <input type="file" id="file-input" class="hidden" accept="image/*,video/*,audio/*,.pdf,.doc,.docx">
+                    <input type="file" id="file-input" class="hidden" accept="image/*,video/*,application/pdf,.doc,.docx" multiple>
                 </label>
                 <input type="text" id="message-input" placeholder="Type a message..." class="flex-1 h-9 px-3 rounded-md border outline-none focus:border-brand-primary text-sm">
                 <button id="send-btn" class="p-2 bg-brand-primary text-white rounded-full hover:bg-emerald-600">
