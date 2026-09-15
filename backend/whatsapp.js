@@ -264,6 +264,8 @@ async function startWhatsApp() {
             const actualSenderId = isFromMe ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : participantJid;
             const actualSenderDisplay = isFromMe ? 'You' : senderDisplay;
 
+            const msgTimestamp = new Date(msg.messageTimestamp * 1000 || Date.now()).toISOString();
+
             const { data: newMessage, error } = await supabase.from('messages').upsert({
                 id: msg.key.id,
                 group_id: jid,
@@ -275,7 +277,8 @@ async function startWhatsApp() {
                 text: text,
                 media_url: mediaUrl,
                 status: msgStatus,
-                quoted_msg: quotedMsg // Ensure this column is JSONB in supabase
+                quoted_msg: quotedMsg,
+                created_at: msgTimestamp
             }, { onConflict: 'id', ignoreDuplicates: true }).select().maybeSingle();
 
             if (error) console.error('Error saving message:', error);
