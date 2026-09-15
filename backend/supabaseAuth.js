@@ -9,6 +9,31 @@ async function useSupabaseAuthState(supabase, sessionId = 'default') {
             file_name: file, 
             data: str 
         }, { onConflict: 'id' });
+
+        // 🧹 Prevent DB bloat: keep only the latest 50 app-state-sync-keys
+        // These keys accumulate endlessly but WhatsApp only needs recent ones
+        // creds.json, device-list-*, identity-key-* are NEVER affected by this
+        if (file.startsWith('app-state-sync-key-')) {
+            try {
+                // Get all app-state-sync-key rows for this session, ordered by id (oldest first)
+                const { data: allKeys } = await supabase
+                    .from('auth_state')
+                    .select('id')
+                    .eq('session_id', sessionId)
+                    .like('file_name', 'app-state-sync-key-%')
+                    .order('id', { ascending: true }); // oldest first
+
+                // If we have more than 50, delete the oldest ones
+                if (allKeys && allKeys.length > 50) {
+                    const toDelete = allKeys.slice(0, allKeys.length - 50); // keep last 50
+                    const idsToDelete = toDelete.map(k => k.id);
+                    await supabase.from('auth_state').delete().in('id', idsToDelete);
+                }
+            } catch (e) {
+                // Non-critical — if cleanup fails, just continue
+                console.log('[auth_state] cleanup skipped:', e.message);
+            }
+        }
     };
 
     const readData = async (file) => {
