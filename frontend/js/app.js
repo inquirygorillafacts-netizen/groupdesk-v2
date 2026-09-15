@@ -4,6 +4,9 @@ let activeGroupId = null;
 let currentPin = '';
 let groups = [];
 let pendingFile = null;
+let currentMessageOffset = 0;
+let isLoadingMore = false;
+let hasMoreMessages = true;
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchWaStatus(); // Check and sync header status immediately
@@ -260,49 +263,95 @@ async function selectGroup(group) {
     document.getElementById('active-group-header').classList.remove('hidden');
     document.getElementById('chat-input-area').classList.remove('hidden');
     document.getElementById('active-group-name').innerText = group.name;
-    document.getElementById('active-group-anon').innerText = `Anonymized · ${group.anonCounter} unknown participants`;
+    document.getElementById('active-group-anon').innerText = `Anonymized · ${group.anon_counter || 0} unknown participants`;
     
     renderSidebar(); // Update active state
     
-    const res = await fetch(`/api/messages/${encodeURIComponent(group.id)}`);
+    currentMessageOffset = 0;
+    hasMoreMessages = true;
+    isLoadingMore = false;
+    
+    const res = await fetch(`/api/messages/${encodeURIComponent(group.id)}?limit=50&offset=${currentMessageOffset}`);
     const messages = await res.json();
     
     const chatBox = document.getElementById('chat-messages');
     chatBox.innerHTML = '';
     chatBox.className = 'flex-1 overflow-y-auto p-4 flex flex-col gap-2 chat-bg thin-scroll';
     
-    messages.forEach(appendMessage);
+    if (messages.length < 50) hasMoreMessages = false;
+    
+    messages.forEach(msg => chatBox.appendChild(createMessageWrapper(msg)));
     setTimeout(scrollToBottom, 100);
+    
+    // Infinite Scroll Logic
+    chatBox.onscroll = async () => {
+        if (chatBox.scrollTop <= 50 && !isLoadingMore && hasMoreMessages) {
+            isLoadingMore = true;
+            currentMessageOffset += 50;
+            
+            const oldScrollHeight = chatBox.scrollHeight;
+            
+            const moreRes = await fetch(`/api/messages/${encodeURIComponent(group.id)}?limit=50&offset=${currentMessageOffset}`);
+            const moreMessages = await moreRes.json();
+            
+            if (moreMessages.length < 50) hasMoreMessages = false;
+            
+            // moreMessages is oldest first, we need to insert them at the top.
+            // Best way is to create a document fragment and insert it.
+            if (moreMessages.length > 0) {
+                const fragment = document.createDocumentFragment();
+                moreMessages.forEach(msg => fragment.appendChild(createMessageWrapper(msg)));
+                chatBox.insertBefore(fragment, chatBox.firstChild);
+                
+                chatBox.scrollTop = chatBox.scrollHeight - oldScrollHeight;
+            }
+            isLoadingMore = false;
+        }
+    };
 }
 
 function appendMessage(msg) {
     const chatBox = document.getElementById('chat-messages');
+    
+    const existing = document.getElementById('msg-node-' + msg.id);
+    if (existing) {
+        existing.replaceWith(createMessageWrapper(msg));
+    } else {
+        chatBox.appendChild(createMessageWrapper(msg));
+    }
+    lucide.createIcons();
+}
+
+function createMessageWrapper(msg) {
     const isOut = msg.direction === 'out';
-    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const time = new Date(msg.created_at || msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
     const wrapper = document.createElement('div');
     wrapper.className = `flex ${isOut ? 'justify-end' : 'justify-start'} w-full group`;
+    wrapper.id = 'msg-node-' + msg.id;
+
     
     // Tag Chip
-    let tagHtml = '';
-    if (isOut) {
+    let tagHtml = '';    if (isOut) {
         tagHtml = `<span class="text-[11px] font-medium text-white/90">You</span>`;
     } else {
-        const isAlias = msg.senderDisplay.startsWith('R');
+        const senderDisp = msg.sender_display || msg.senderDisplay || 'Unknown';
+        const isAlias = senderDisp.startsWith('R');
         tagHtml = isAlias 
-            ? `<span class="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-emerald-100 text-emerald-800">🔒 ${msg.senderDisplay}</span>`
-            : `<span class="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">👤 ${msg.senderDisplay}</span>`;
+            ? `<span class="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-emerald-100 text-emerald-800">🔒 ${senderDisp}</span>`
+            : `<span class="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">👤 ${senderDisp}</span>`;
     }
 
     // Media HTML
     let mediaHtml = '';
-    if (msg.mediaUrl) {
+    const mediaUrl = msg.media_url || msg.mediaUrl;
+    if (mediaUrl) {
         if (msg.type === 'image') {
-            mediaHtml = `<img src="${msg.mediaUrl}" onclick="openFullscreen('${msg.mediaUrl}', 'image')" class="rounded-lg max-h-64 object-cover cursor-pointer my-1 w-full" />`;
+            mediaHtml = `<img src="${mediaUrl}" onclick="openFullscreen('${mediaUrl}', 'image')" class="rounded-lg max-h-64 object-cover cursor-pointer my-1 w-full" />`;
         } else if (msg.type === 'video') {
             mediaHtml = `
-            <div class="relative group my-1 cursor-pointer bg-black/10 rounded-lg overflow-hidden flex items-center justify-center max-h-64" onclick="openFullscreen('${msg.mediaUrl}', 'video')">
-                <video src="${msg.mediaUrl}#t=0.001" preload="metadata" class="w-full h-full object-cover max-h-64 pointer-events-none"></video>
+            <div class="relative group my-1 cursor-pointer bg-black/10 rounded-lg overflow-hidden flex items-center justify-center max-h-64" onclick="openFullscreen('${mediaUrl}', 'video')">
+                <video src="${mediaUrl}#t=0.001" preload="metadata" class="w-full h-full object-cover max-h-64 pointer-events-none"></video>
                 <div class="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20 group-hover:bg-black/30 transition-colors">
                     <div class="w-12 h-12 bg-black/60 rounded-full flex items-center justify-center backdrop-blur-md">
                         <i data-lucide="play" class="w-5 h-5 text-white ml-1"></i>
@@ -310,10 +359,10 @@ function appendMessage(msg) {
                 </div>
             </div>`;
         } else if (msg.type === 'audio') {
-            mediaHtml = `<audio src="${msg.mediaUrl}" controls class="w-full max-w-[260px] h-10 my-1"></audio>`;
+            mediaHtml = `<audio src="${mediaUrl}" controls class="w-full max-w-[260px] h-10 my-1"></audio>`;
         } else {
             mediaHtml = `
-            <a href="${msg.mediaUrl}" download class="flex items-center gap-3 p-3 rounded-xl border transition-colors max-w-sm my-1 ${isOut ? 'bg-white/10 border-white/20 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}">
+            <a href="${mediaUrl}" download class="flex items-center gap-3 p-3 rounded-xl border transition-colors max-w-sm my-1 ${isOut ? 'bg-white/10 border-white/20 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}">
                 <div class="w-10 h-10 shrink-0 rounded-lg flex items-center justify-center ${isOut ? 'bg-white/20' : 'bg-emerald-100 text-emerald-600'}">
                     <i data-lucide="file-text" class="w-5 h-5"></i>
                 </div>
@@ -326,11 +375,12 @@ function appendMessage(msg) {
 
     // Quoted Msg HTML
     let quotedHtml = '';
-    if (msg.quotedMsg) {
+    const quotedMsg = msg.quoted_msg || msg.quotedMsg;
+    if (quotedMsg) {
         quotedHtml = `
             <div class="mb-2 rounded-lg overflow-hidden border-l-4 px-2 py-1 text-[12px] ${isOut ? 'bg-emerald-700/50 border-white/50 text-white/90' : 'bg-slate-100 border-emerald-500 text-slate-700'}">
-                <div class="font-semibold text-[10px] mb-0.5 opacity-80">${msg.quotedMsg.sender || 'Unknown'}</div>
-                <div class="truncate">${msg.quotedMsg.text || 'Media'}</div>
+                <div class="font-semibold text-[10px] mb-0.5 opacity-80">${quotedMsg.sender || 'Unknown'}</div>
+                <div class="truncate">${quotedMsg.text || 'Media'}</div>
             </div>
         `;
     }
@@ -387,14 +437,7 @@ function appendMessage(msg) {
         </div>
     `;
     
-    // Replace if exists, else append
-    const existing = document.getElementById('msg-node-' + msg.id);
-    if (existing) {
-        existing.innerHTML = wrapper.innerHTML;
-    } else {
-        chatBox.appendChild(wrapper);
-    }
-    lucide.createIcons();
+    return wrapper;
 }
 
 function searchMessages(query) {
@@ -500,7 +543,7 @@ function setReply(msg) {
     // Show Preview
     const container = document.getElementById('reply-preview-container');
     if (container) {
-        document.getElementById('reply-preview-sender').innerText = msg.senderDisplay || 'Unknown';
+        document.getElementById('reply-preview-sender').innerText = msg.sender_display || msg.senderDisplay || 'Unknown';
         document.getElementById('reply-preview-text').innerText = msg.text || 'Media';
         container.classList.remove('hidden');
     }
@@ -577,6 +620,7 @@ async function verifyPin() {
         document.getElementById('pin-section').classList.add('hidden');
         document.getElementById('settings-section').classList.remove('hidden');
         switchTab('groups');
+        fetchSettings();
     } else {
         pinInput.classList.add('shake', 'border-red-500');
         setTimeout(() => pinInput.classList.remove('shake', 'border-red-500'), 400);
@@ -586,9 +630,11 @@ async function verifyPin() {
 function switchTab(tab) {
     document.getElementById('tab-qr').className = `pb-2 border-b-2 font-medium ${tab === 'qr' ? 'border-brand-primary text-brand-primary' : 'border-transparent text-slate-500'}`;
     document.getElementById('tab-groups').className = `pb-2 border-b-2 font-medium ${tab === 'groups' ? 'border-brand-primary text-brand-primary' : 'border-transparent text-slate-500'}`;
+    document.getElementById('tab-auto-delete').className = `pb-2 border-b-2 font-medium ${tab === 'auto-delete' ? 'border-brand-primary text-brand-primary' : 'border-transparent text-slate-500'}`;
     
     document.getElementById('content-qr').classList.toggle('hidden', tab !== 'qr');
     document.getElementById('content-groups').classList.toggle('hidden', tab !== 'groups');
+    document.getElementById('content-auto-delete').classList.toggle('hidden', tab !== 'auto-delete');
     
     if (tab === 'qr') {
         fetchWaStatus();
@@ -640,3 +686,70 @@ async function toggleGroup(id, enabled) {
         body: JSON.stringify({ pin: currentPin, groupId: id, enabled })
     });
 }
+
+// Auto-Delete Settings Logic
+async function fetchSettings() {
+    try {
+        const res = await fetch('/api/admin/settings');
+        const settings = await res.json();
+        
+        document.getElementById('auto-delete-toggle').checked = settings.auto_delete_enabled;
+        document.getElementById('auto-delete-days').value = settings.auto_delete_days || 60;
+        updateAutoDeleteUI();
+    } catch (e) {
+        console.error('Failed to fetch settings', e);
+    }
+}
+
+function updateAutoDeleteUI() {
+    const isEnabled = document.getElementById('auto-delete-toggle').checked;
+    const daysInput = document.getElementById('auto-delete-days');
+    const optionsContainer = document.getElementById('auto-delete-options');
+    const dot = document.getElementById('auto-delete-status-dot');
+    
+    if (isEnabled) {
+        optionsContainer.classList.remove('opacity-50', 'pointer-events-none');
+    } else {
+        optionsContainer.classList.add('opacity-50', 'pointer-events-none');
+    }
+    
+    let days = parseInt(daysInput.value);
+    if (isNaN(days)) days = 60;
+    if (days < 15) days = 15;
+    if (days > 90) days = 90;
+    
+    if (days < 30) {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]';
+    } else {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]';
+    }
+}
+
+async function saveSettings() {
+    const isEnabled = document.getElementById('auto-delete-toggle').checked;
+    const daysInput = document.getElementById('auto-delete-days');
+    
+    let days = parseInt(daysInput.value);
+    if (isNaN(days) || days < 15) days = 15;
+    if (days > 90) days = 90;
+    daysInput.value = days;
+    
+    try {
+        await fetch('/api/admin/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                pin: currentPin,
+                auto_delete_enabled: isEnabled,
+                auto_delete_days: days
+            })
+        });
+        
+        const msg = document.getElementById('settings-save-msg');
+        msg.classList.remove('hidden');
+        setTimeout(() => msg.classList.add('hidden'), 3000);
+    } catch (e) {
+        console.error('Failed to save settings', e);
+    }
+}
+

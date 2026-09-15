@@ -4,8 +4,15 @@ const { Server } = require('socket.io');
 const path = require('path');
 const cors = require('cors');
 const multer = require('multer');
-const fs = require('fs');
-const { Group, Message } = require('./models');
+const crypto = require('crypto');
+const { supabase } = require('./supabase');
+const { initCron } = require('./cron');
+
+// Production Environment Checks
+if (!process.env.SUPABASE_URL || !process.env.DATABASE_URL) {
+    console.error('🚨 CRITICAL ERROR: Missing SUPABASE_URL or DATABASE_URL in .env file.');
+    process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -13,30 +20,21 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 // Static files (Frontend)
 app.use(express.static(path.join(__dirname, '../frontend')));
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use(express.json());
 app.use(cors());
 
-// File upload setup
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const uploadPath = path.join(__dirname, '../uploads');
-        if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-        }
-        cb(null, uploadPath);
-    },
-    filename: (req, file, cb) => {
-        cb(null, Date.now() + '-' + file.originalname.replace(/\s/g, '_'));
-    }
-});
+// File upload setup - Memory Storage for Supabase
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // API Routes
 app.get('/api/groups', async (req, res) => {
     try {
         const { getStatus, getActiveGroupJids } = require('./whatsapp');
-        const groups = await Group.find({});
+        
+        const { data: groups, error } = await supabase.from('groups').select('*').order('last_at', { ascending: false, nullsFirst: false });
+        if (error) throw error;
+        
         const isConnected = getStatus();
         const activeJids = isConnected ? getActiveGroupJids() : [];
         
@@ -53,20 +51,44 @@ app.get('/api/groups', async (req, res) => {
 
 app.get('/api/messages/:groupId', async (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 100;
-        const messages = await Message.find({ groupId: req.params.groupId })
-            .sort({ timestamp: -1 })
-            .limit(limit);
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = parseInt(req.query.offset) || 0;
+        
+        const { data: messages, error } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('group_id', req.params.groupId)
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+            
+        if (error) throw error;
+        
+        // Reverse because UI expects oldest first (bottom up)
         res.json(messages.reverse());
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const url = `/uploads/${req.file.filename}`;
-    res.json({ url, filename: req.file.filename, type: req.file.mimetype });
+    
+    try {
+        const ext = path.extname(req.file.originalname);
+        const filename = `media_${crypto.randomUUID()}${ext}`;
+        
+        const { data, error } = await supabase.storage.from('uploads').upload(filename, req.file.buffer, {
+            contentType: req.file.mimetype
+        });
+        
+        if (error) throw error;
+        
+        const { data: publicUrlData } = supabase.storage.from('uploads').getPublicUrl(filename);
+        
+        res.json({ url: publicUrlData.publicUrl, filename: filename, type: req.file.mimetype });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/messages/react', async (req, res) => {
@@ -76,7 +98,7 @@ app.post('/api/messages/react', async (req, res) => {
         const sock = getSock();
         if (!sock) return res.status(400).json({ error: 'Not connected' });
         
-        const msg = await Message.findOne({ id: messageId });
+        const { data: msg } = await supabase.from('messages').select('*').eq('id', messageId).single();
         if (!msg) return res.status(404).json({ error: 'Message not found' });
         
         await sock.sendMessage(groupId, {
@@ -86,7 +108,7 @@ app.post('/api/messages/react', async (req, res) => {
                     id: messageId, 
                     remoteJid: groupId, 
                     fromMe: msg.direction === 'out',
-                    participant: msg.direction === 'in' ? msg.senderId : undefined
+                    participant: msg.direction === 'in' ? msg.sender_id : undefined
                 }
             }
         });
@@ -95,10 +117,10 @@ app.post('/api/messages/react', async (req, res) => {
         const reactions = msg.reactions || {};
         reactions[reaction] = (reactions[reaction] || 0) + 1;
         
-        await Message.updateOne({ id: messageId }, { $set: { reactions } });
+        await supabase.from('messages').update({ reactions }).eq('id', messageId);
         
-        const { io } = require('./server');
-        if (io) io.to(groupId).emit('new-message', await Message.findOne({ id: messageId }));
+        const { data: updatedMsg } = await supabase.from('messages').select('*').eq('id', messageId).single();
+        io.to(groupId).emit('new-message', updatedMsg);
         
         res.json({ success: true });
     } catch (e) {
@@ -123,9 +145,51 @@ app.post('/api/admin/toggle-group', async (req, res) => {
     if (pin !== ADMIN_PIN) return res.status(401).json({ error: 'Unauthorized' });
     
     try {
-        const group = await Group.findOneAndUpdate({ id: groupId }, { enabled }, { new: true });
+        const { data: group, error } = await supabase
+            .from('groups')
+            .update({ enabled })
+            .eq('id', groupId)
+            .select()
+            .single();
+            
+        if (error) throw error;
+        
         io.emit('groups-updated');
         res.json(group);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// App Settings APIs
+app.post('/api/admin/settings', async (req, res) => {
+    const { pin, auto_delete_enabled, auto_delete_days } = req.body;
+    if (pin !== ADMIN_PIN) return res.status(401).json({ error: 'Unauthorized' });
+    
+    try {
+        const { data: settings, error } = await supabase
+            .from('app_settings')
+            .upsert({ id: 1, auto_delete_enabled, auto_delete_days })
+            .select()
+            .single();
+            
+        if (error) throw error;
+        res.json(settings);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/admin/settings', async (req, res) => {
+    try {
+        const { data: settings, error } = await supabase
+            .from('app_settings')
+            .select('*')
+            .eq('id', 1)
+            .single();
+            
+        if (error) throw error;
+        res.json(settings || { auto_delete_enabled: false, auto_delete_days: 60 });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -150,3 +214,6 @@ io.on('connection', (socket) => {
 
 // Export io so whatsapp.js can emit events
 module.exports = { app, server, io };
+
+// Start the cron job
+initCron();

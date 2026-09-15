@@ -1,8 +1,9 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const { Group, Message, Alias } = require('./models');
+const { supabase } = require('./supabase');
+const { useSupabaseAuthState } = require('./supabaseAuth');
 const { io } = require('./server'); // Import io for real-time updates
 
 let sock;
@@ -11,7 +12,7 @@ let currentQr = null;
 let activeGroupJids = [];
 
 async function startWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+    const { state, saveCreds } = await useSupabaseAuthState(supabase, 'default');
     
     sock = makeWASocket({
         auth: state,
@@ -22,7 +23,7 @@ async function startWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
@@ -41,8 +42,9 @@ async function startWhatsApp() {
             if (shouldReconnect) {
                 startWhatsApp();
             } else {
-                fs.rmSync('baileys_auth_info', { recursive: true, force: true });
-                console.log('Logged out. Deleted auth info.');
+                // If logged out, delete auth state from Supabase
+                await supabase.from('auth_state').delete().eq('session_id', 'default');
+                console.log('Logged out. Deleted auth info from Supabase.');
             }
         } else if (connection === 'open') {
             isConnected = true;
@@ -55,18 +57,15 @@ async function startWhatsApp() {
     // Handle Historical Sync
     sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, isLatest }) => {
         console.log(`Syncing ${messages.length} historical messages...`);
+        const messagesToInsert = [];
         for (const msg of messages) {
             if (!msg.message || msg.key.fromMe) continue;
             
             const jid = msg.key.remoteJid;
             if (!jid.endsWith('@g.us')) continue; // Only handle groups
             
-            // Check if msg already exists to avoid duplicates
-            const existing = await Message.findOne({ id: msg.key.id });
-            if (existing) continue;
-
             const participantJid = msg.key.participant || jid;
-            const pushName = msg.pushName || 'User'; // Historical messages sometimes lack pushName
+            const pushName = msg.pushName || 'User'; 
             
             let senderDisplay = pushName;
             
@@ -78,23 +77,30 @@ async function startWhatsApp() {
             else if (msg.message.documentMessage) { type = 'document'; text = msg.message.documentMessage.fileName || text; }
             else if (msg.message.audioMessage) { type = 'audio'; }
             
-            // Note: We don't download media for historical sync to save disk space and time, 
-            // unless strictly requested. We'll mark mediaUrl as null for now for old media.
-            
-            await Message.create({
+            messagesToInsert.push({
                 id: msg.key.id,
-                groupId: jid,
-                senderId: participantJid,
-                senderDisplay: senderDisplay,
+                group_id: jid,
+                sender_id: participantJid,
+                sender_display: senderDisplay,
                 kind: 'client',
                 direction: 'in',
                 type: type,
                 text: text,
-                mediaUrl: null, 
-                timestamp: msg.messageTimestamp * 1000 || Date.now(),
+                media_url: null, 
+                created_at: new Date(msg.messageTimestamp * 1000 || Date.now()).toISOString(),
                 status: 'received'
             });
         }
+
+        if (messagesToInsert.length > 0) {
+            // Upsert historical messages in chunks to avoid large payload errors
+            const chunkSize = 1000;
+            for (let i = 0; i < messagesToInsert.length; i += chunkSize) {
+                const chunk = messagesToInsert.slice(i, i + chunkSize);
+                await supabase.from('messages').upsert(chunk, { onConflict: 'id', ignoreDuplicates: true });
+            }
+        }
+
         console.log('✅ Historical sync complete!');
         io.emit('groups-updated');
     });
@@ -110,12 +116,18 @@ async function startWhatsApp() {
             if (!jid.endsWith('@g.us')) continue; // Only handle groups
 
             // Check if group is enabled in our DB
-            let group = await Group.findOne({ id: jid });
+            let { data: group } = await supabase.from('groups').select('*').eq('id', jid).single();
             if (!group) {
                 // If not in DB, add it but disabled by default
                 const groupMetadata = await sock.groupMetadata(jid).catch(() => null);
                 const groupName = groupMetadata ? groupMetadata.subject : jid;
-                group = await Group.create({ id: jid, name: groupName, enabled: false });
+                const { data: newGroup } = await supabase.from('groups').insert({ 
+                    id: jid, 
+                    whatsapp_group_id: jid,
+                    name: groupName, 
+                    enabled: false 
+                }).select().single();
+                group = newGroup;
             }
 
             if (!group.enabled) continue; // Ignore disabled groups
@@ -128,16 +140,17 @@ async function startWhatsApp() {
             
             // If no pushName, use Alias logic (R1, R2...)
             if (!pushName) {
-                let aliasRecord = await Alias.findOne({ groupId: jid, participantId: participantJid });
+                let { data: aliasRecord } = await supabase.from('aliases').select('*').eq('group_id', jid).eq('participant_id', participantJid).single();
                 if (!aliasRecord) {
-                    const newCounter = (group.anonCounter || 0) + 1;
-                    await Group.updateOne({ id: jid }, { $set: { anonCounter: newCounter } });
+                    const { data: counterData, error: rpcError } = await supabase.rpc('increment_anon_counter', { group_id_param: jid });
+                    const newCounter = rpcError ? 1 : counterData;
                     
-                    aliasRecord = await Alias.create({
-                        groupId: jid,
-                        participantId: participantJid,
+                    const { data: newAlias } = await supabase.from('aliases').insert({
+                        group_id: jid,
+                        participant_id: participantJid,
                         alias: `R${newCounter}`
-                    });
+                    }).select().single();
+                    aliasRecord = newAlias;
                 }
                 senderDisplay = aliasRecord.alias;
             }
@@ -157,7 +170,7 @@ async function startWhatsApp() {
             else if (documentMsg) { type = 'document'; text = documentMsg.fileName || text; }
             else if (audioMsg) { type = 'audio'; }
 
-            // Download media if exists
+            // Download media if exists & Upload to Supabase Storage
             if (imageMsg || videoMsg || documentMsg || audioMsg) {
                 try {
                     const buffer = await downloadMediaMessage(msg, 'buffer', { }, { 
@@ -166,12 +179,19 @@ async function startWhatsApp() {
                     });
                     
                     const extension = imageMsg ? '.jpg' : videoMsg ? '.mp4' : documentMsg ? ('.' + documentMsg.fileName.split('.').pop()) : '.ogg';
-                    const filename = `media_${Date.now()}${extension}`;
-                    const uploadPath = path.join(__dirname, '../uploads');
-                    if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
+                    const filename = `media_${msg.key.id}_${Date.now()}${extension}`;
                     
-                    fs.writeFileSync(path.join(uploadPath, filename), buffer);
-                    mediaUrl = `/uploads/${filename}`;
+                    // Upload to Supabase storage bucket 'uploads'
+                    const { data, error } = await supabase.storage.from('uploads').upload(filename, buffer, {
+                        contentType: imageMsg ? 'image/jpeg' : videoMsg ? 'video/mp4' : documentMsg ? 'application/octet-stream' : 'audio/ogg'
+                    });
+
+                    if (!error) {
+                        const { data: publicUrlData } = supabase.storage.from('uploads').getPublicUrl(filename);
+                        mediaUrl = publicUrlData.publicUrl;
+                    } else {
+                        console.error('Supabase storage upload error:', error);
+                    }
                 } catch (e) {
                     console.error('Failed to download media:', e);
                 }
@@ -190,23 +210,28 @@ async function startWhatsApp() {
             }
 
             // Save to DB
-            const newMessage = await Message.create({
+            const { data: newMessage, error } = await supabase.from('messages').insert({
                 id: msg.key.id,
-                groupId: jid,
-                senderId: participantJid,
-                senderDisplay: senderDisplay,
+                group_id: jid,
+                sender_id: participantJid,
+                sender_display: senderDisplay,
                 kind: 'client',
                 direction: 'in',
                 type: type,
                 text: text,
-                mediaUrl: mediaUrl,
-                timestamp: Date.now(),
+                media_url: mediaUrl,
                 status: 'received',
-                quotedMsg: quotedMsg
-            });
+                quoted_msg: quotedMsg // Ensure this column is JSONB in supabase
+            }).select().single();
+
+            if (error) console.error('Error saving message:', error);
 
             // Update group last active
-            await Group.updateOne({ id: jid }, { lastAt: Date.now(), lastPreview: text || type, $inc: { unread: 1 } });
+            await supabase.from('groups').update({ 
+                last_at: new Date().toISOString(), 
+                last_preview: text || type 
+            }).eq('id', jid);
+            await supabase.rpc('increment_unread', { group_id_param: jid });
 
             // Emit to frontend
             io.to(jid).emit('new-message', newMessage);
@@ -224,36 +249,41 @@ async function syncGroups() {
     try {
         const chats = await sock.groupFetchAllParticipating();
         activeGroupJids = Object.keys(chats);
+        
         for (const jid in chats) {
             const group = chats[jid];
-            const existing = await Group.findOne({ id: jid });
+            const { data: existing } = await supabase.from('groups').select('id').eq('id', jid).single();
             if (!existing) {
-                await Group.create({ id: jid, name: group.subject, enabled: false });
+                await supabase.from('groups').insert({ 
+                    id: jid, 
+                    whatsapp_group_id: jid,
+                    name: group.subject, 
+                    enabled: false 
+                });
             } else {
-                await Group.updateOne({ id: jid }, { name: group.subject });
+                await supabase.from('groups').update({ name: group.subject }).eq('id', jid);
             }
         }
         io.emit('groups-updated');
-        console.log('✅ Groups synced');
+        console.log('✅ Groups synced to Supabase');
     } catch (e) {
         console.error('Error syncing groups', e);
     }
 }
 
 // Function to send message from Frontend -> WhatsApp
-async function sendMessage(groupId, text, type = 'text', mediaPath = null, quotedMsgId = null) {
+async function sendMessage(groupId, text, type = 'text', mediaUrl = null, quotedMsgId = null) {
     if (!sock) throw new Error('WhatsApp not connected');
 
     const options = {};
     let quotedMsgObj = null;
     
     if (quotedMsgId) {
-        const { Message } = require('./models');
-        const quotedMsg = await Message.findOne({ id: quotedMsgId });
+        const { data: quotedMsg } = await supabase.from('messages').select('*').eq('id', quotedMsgId).single();
         if (quotedMsg) {
             quotedMsgObj = {
                 id: quotedMsg.id,
-                sender: quotedMsg.senderDisplay,
+                sender: quotedMsg.sender_display,
                 text: quotedMsg.text
             };
             options.quoted = {
@@ -261,7 +291,7 @@ async function sendMessage(groupId, text, type = 'text', mediaPath = null, quote
                     id: quotedMsg.id,
                     remoteJid: groupId,
                     fromMe: quotedMsg.direction === 'out',
-                    participant: quotedMsg.direction === 'in' ? quotedMsg.senderId : undefined
+                    participant: quotedMsg.direction === 'in' ? quotedMsg.sender_id : undefined
                 },
                 message: {
                     conversation: quotedMsg.text || 'Media'
@@ -274,32 +304,35 @@ async function sendMessage(groupId, text, type = 'text', mediaPath = null, quote
     if (type === 'text') {
         sentMsg = await sock.sendMessage(groupId, { text: text }, options);
     } else if (type === 'image' || type === 'video' || type === 'audio' || type === 'document') {
-        const buffer = fs.readFileSync(path.join(__dirname, '../', mediaPath));
+        // Fetch buffer from Supabase public URL
+        const response = await fetch(mediaUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        const fileName = mediaUrl.split('/').pop();
         if (type === 'image') sentMsg = await sock.sendMessage(groupId, { image: buffer, caption: text }, options);
         if (type === 'video') sentMsg = await sock.sendMessage(groupId, { video: buffer, caption: text }, options);
         if (type === 'audio') sentMsg = await sock.sendMessage(groupId, { audio: buffer, ptt: true }, options);
-        if (type === 'document') sentMsg = await sock.sendMessage(groupId, { document: buffer, caption: text, fileName: path.basename(mediaPath) }, options);
+        if (type === 'document') sentMsg = await sock.sendMessage(groupId, { document: buffer, caption: text, fileName: fileName }, options);
     }
 
     if (sentMsg) {
         // Save outgoing message to DB
-        const { Message } = require('./models');
-        const newMessage = await Message.create({
+        const { data: newMessage, error } = await supabase.from('messages').insert({
             id: sentMsg.key.id,
-            groupId,
-            senderId: sock.user.id.split(':')[0] + '@s.whatsapp.net',
-            senderDisplay: 'You',
+            group_id: groupId,
+            sender_id: sock.user.id.split(':')[0] + '@s.whatsapp.net',
+            sender_display: 'You',
             kind: 'client',
             direction: 'out',
             type,
             text,
-            mediaUrl: mediaPath,
-            timestamp: Date.now(),
+            media_url: mediaUrl,
             status: 'sent',
-            quotedMsg: quotedMsgObj
-        });
+            quoted_msg: quotedMsgObj
+        }).select().single();
         
-        await Group.updateOne({ id: groupId }, { lastAt: Date.now(), lastPreview: text || type });
+        await supabase.from('groups').update({ last_at: new Date().toISOString(), last_preview: text || type }).eq('id', groupId);
         io.to(groupId).emit('new-message', newMessage);
         io.emit('groups-updated');
         
@@ -325,8 +358,8 @@ async function forceGenerateQr() {
             sock.ws.close();
         } catch(e) {}
     }
-    // Delete existing auth info just in case to force a completely fresh login state
-    try { fs.rmSync(path.join(__dirname, '../baileys_auth_info'), { recursive: true, force: true }); } catch (e) {}
+    // Delete existing auth info from DB
+    await supabase.from('auth_state').delete().eq('session_id', 'default');
     currentQr = null;
     await startWhatsApp();
 }
