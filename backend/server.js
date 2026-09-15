@@ -244,6 +244,14 @@ app.get('/api/admin/settings', async (req, res) => {
 io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
     
+    // Send initial WA status to the newly connected client
+    const { getStatus, getQr } = require('./whatsapp');
+    const status = getStatus();
+    socket.emit('wa-status', status);
+    if (status === 'disconnected' && getQr()) {
+        socket.emit('qr-code', getQr());
+    }
+    
     // Allow frontend to join a specific group room
     socket.on('join-group', (groupId) => {
         socket.rooms.forEach(room => {

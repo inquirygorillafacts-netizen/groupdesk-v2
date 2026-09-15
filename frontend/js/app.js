@@ -317,6 +317,13 @@ document.addEventListener('DOMContentLoaded', () => {
 // Socket Events
 let waConnected = false;
 
+socket.on('connect', () => {
+    // If the socket reconnects, ensure we are still in the active group's room
+    if (activeGroupId) {
+        socket.emit('join-group', activeGroupId);
+    }
+});
+
 socket.on('wa-status', (status) => {
     const el = document.getElementById('connection-status');
     const wasConnected = waConnected;
@@ -362,12 +369,7 @@ socket.on('new-message', (msg) => {
         appendMessage(msg);
         scrollToBottom();
     } else {
-        // Increment Unread Badge locally in RAM (since DB is updated via webhook)
-        const g = groups.find(x => x.id === msg.group_id);
-        if (g) g.unread = (g.unread || 0) + 1;
-        renderSidebar();
-        
-        // Play notification sound
+        // Play notification sound if message is for another group or window is hidden
         if (!msg.isOut && msg.direction !== 'out') {
             try {
                 // Short minimalist blip base64 (tiny 1 second beep)
@@ -528,7 +530,18 @@ async function disconnectWhatsApp() {
 
 async function fetchGroups() {
     const res = await fetch('/api/groups');
-    groups = await res.json();
+    const fetchedGroups = await res.json();
+    
+    // Auto-clear unread count for the active group if the page is visible!
+    if (activeGroupId && !document.hidden) {
+        const ag = fetchedGroups.find(g => g.id === activeGroupId);
+        if (ag && ag.unread > 0) {
+            ag.unread = 0;
+            fetch(`/api/groups/${activeGroupId}/read`, { method: 'POST' }).catch(console.error);
+        }
+    }
+    
+    groups = fetchedGroups;
     renderSidebar();
     renderAdminGroups();
     
