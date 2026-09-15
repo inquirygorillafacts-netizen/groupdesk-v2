@@ -146,6 +146,32 @@ async function startWhatsApp() {
 
             if (!group.enabled) continue; // Ignore disabled groups
 
+            // Handle incoming reaction
+            if (msg.message.reactionMessage) {
+                const reactionMsg = msg.message.reactionMessage;
+                const targetMsgId = reactionMsg.key.id;
+                const reactionText = reactionMsg.text; // empty if removing reaction
+                
+                // Fetch target message
+                const { data: targetMsg } = await supabase.from('messages').select('*').eq('id', targetMsgId).single();
+                if (targetMsg) {
+                    let reactions = targetMsg.reactions || {};
+                    if (reactionText) {
+                        reactions[reactionText] = (reactions[reactionText] || 0) + 1;
+                    }
+                    
+                    await supabase.from('messages').update({ reactions }).eq('id', targetMsgId);
+                    
+                    // Emit updated message to frontend
+                    const { data: updatedMsg } = await supabase.from('messages').select('*').eq('id', targetMsgId).single();
+                    if (updatedMsg) {
+                        const { io } = require('./server');
+                        io.to(jid).emit('new-message', updatedMsg);
+                    }
+                }
+                continue; // Skip normal message processing
+            }
+
             // Extract sender logic
             const participantJid = msg.key.participant || jid; // Who sent it
             const pushName = msg.pushName;

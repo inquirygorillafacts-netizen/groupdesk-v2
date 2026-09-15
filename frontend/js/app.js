@@ -800,7 +800,7 @@ function createMessageWrapper(msg) {
     const time = new Date(msg.created_at || msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
     const wrapper = document.createElement('div');
-    wrapper.className = `flex ${isOut ? 'justify-end' : 'justify-start'} w-full group`;
+    wrapper.className = `flex ${isOut ? 'justify-end' : 'justify-start'} w-full group relative`;
     wrapper.id = 'msg-node-' + msg.id;
 
     
@@ -875,9 +875,9 @@ function createMessageWrapper(msg) {
     let quotedHtml = '';
     const quotedMsg = msg.quoted_msg || msg.quotedMsg;
     if (quotedMsg) {
+        // Keeping sender data in JS object if needed, but NOT displaying it in the UI
         quotedHtml = `
-            <div class="mb-2 rounded-lg overflow-hidden border-l-4 px-2 py-1 text-[12px] ${isOut ? 'bg-emerald-700/50 border-white/50 text-white/90' : 'bg-slate-100 border-emerald-500 text-slate-700'}">
-                <div class="font-semibold text-[10px] mb-0.5 opacity-80">${quotedMsg.sender || 'Unknown'}</div>
+            <div onclick="scrollToMessage('${quotedMsg.id}')" class="mb-2 rounded-lg overflow-hidden border-l-4 px-2 py-2 text-[12px] cursor-pointer hover:opacity-80 transition-opacity ${isOut ? 'bg-emerald-700/50 border-white/50 text-white/90' : 'bg-slate-100 border-emerald-500 text-slate-700'}">
                 <div class="truncate">${quotedMsg.text || 'Media'}</div>
             </div>
         `;
@@ -1048,6 +1048,31 @@ function removePendingFile(index) {
             activePreviewIndex = pendingFiles.length - 1;
         }
         showMediaPreview();
+    }
+}
+
+// Scroll to Quoted Message
+function scrollToMessage(id) {
+    const el = document.getElementById('msg-node-' + id);
+    if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        
+        // Full row yellow highlight overlay
+        const overlay = document.createElement('div');
+        overlay.className = 'absolute inset-0 bg-yellow-500/20 pointer-events-none transition-opacity duration-500 z-[5] rounded-lg';
+        overlay.style.opacity = '1';
+        
+        el.appendChild(overlay);
+        
+        setTimeout(() => {
+            overlay.style.opacity = '0';
+            setTimeout(() => {
+                overlay.remove();
+            }, 500);
+        }, 1200);
+        
+    } else {
+        showToast('Message not loaded locally');
     }
 }
 
