@@ -132,7 +132,7 @@ async function startWhatsApp() {
         if (m.type !== 'notify') return;
         
         for (const msg of m.messages) {
-            if (!msg.message || msg.key.fromMe) continue;
+            if (!msg.message) continue;
             
             const jid = msg.key.remoteJid;
             if (!jid.endsWith('@g.us')) continue; // Only handle groups
@@ -257,33 +257,44 @@ async function startWhatsApp() {
                 };
             }
 
-            // Save to DB
-            const { data: newMessage, error } = await supabase.from('messages').insert({
+            // Save to DB (only if it doesn't exist, preventing double-emit for tool-sent messages)
+            const isFromMe = msg.key.fromMe;
+            const msgDirection = isFromMe ? 'out' : 'in';
+            const msgStatus = isFromMe ? 'sent' : 'received';
+            const actualSenderId = isFromMe ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : participantJid;
+            const actualSenderDisplay = isFromMe ? 'You' : senderDisplay;
+
+            const { data: newMessage, error } = await supabase.from('messages').upsert({
                 id: msg.key.id,
                 group_id: jid,
-                sender_id: participantJid,
-                sender_display: senderDisplay,
+                sender_id: actualSenderId,
+                sender_display: actualSenderDisplay,
                 kind: 'client',
-                direction: 'in',
+                direction: msgDirection,
                 type: type,
                 text: text,
                 media_url: mediaUrl,
-                status: 'received',
+                status: msgStatus,
                 quoted_msg: quotedMsg // Ensure this column is JSONB in supabase
-            }).select().single();
+            }, { onConflict: 'id', ignoreDuplicates: true }).select().maybeSingle();
 
             if (error) console.error('Error saving message:', error);
 
-            // Update group last active
-            await supabase.from('groups').update({ 
-                last_at: new Date().toISOString(), 
-                last_preview: text || type 
-            }).eq('id', jid);
-            await supabase.rpc('increment_unread', { group_id_param: jid });
+            if (newMessage) {
+                // Update group last active
+                await supabase.from('groups').update({ 
+                    last_at: new Date().toISOString(), 
+                    last_preview: text || type 
+                }).eq('id', jid);
+                
+                if (!isFromMe) {
+                    await supabase.rpc('increment_unread', { group_id_param: jid });
+                }
 
-            // Emit to frontend
-            io.to(jid).emit('new-message', newMessage);
-            io.emit('groups-updated');
+                // Emit to frontend
+                io.to(jid).emit('new-message', newMessage);
+                io.emit('groups-updated');
+            }
         }
     });
 }
