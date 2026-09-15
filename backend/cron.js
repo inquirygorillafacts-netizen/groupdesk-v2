@@ -61,19 +61,34 @@ async function runAutoDelete() {
     }
 }
 
-// Clean up old WhatsApp session keys (app-state-sync keys grow endlessly)
-// We keep ONLY: creds.json, device-list-*, identity-key-*, pre-key-*, sender-key-*
-// We delete: app-state-sync-key-* (these are the ones causing 14,000+ rows)
+// Clean up all temporary WhatsApp session keys that accumulate endlessly
+// SAFE: creds.json, device-list-*, identity-key-*, app-state-sync-version-* are NEVER touched
 async function cleanAuthState() {
     try {
         console.log('🧹 [CRON] Cleaning up stale auth_state keys...');
-        const { data, error } = await supabase
-            .from('auth_state')
-            .delete()
-            .like('file_name', 'app-state-sync-key-%');
         
-        if (error) throw error;
-        console.log('✅ [CRON] auth_state cleanup done.');
+        const typesToDelete = [
+            'app-state-sync-key-%',  // sync keys (main bloat)
+            'lid-mapping-%',          // contact ID mappings
+            'pre-key-%',              // encryption pre-keys (1600+ rows!)
+            'session-%',              // session keys (temporary)
+            'tctoken-%',              // token keys (temporary)
+            'sender-key-%',           // sender keys (regenerated per session)
+        ];
+
+        for (const pattern of typesToDelete) {
+            const { error } = await supabase
+                .from('auth_state')
+                .delete()
+                .like('file_name', pattern);
+            if (error) console.error(`[CRON] Failed to delete ${pattern}:`, error.message);
+        }
+
+        const { count } = await supabase
+            .from('auth_state')
+            .select('*', { count: 'exact', head: true });
+        
+        console.log(`✅ [CRON] auth_state cleanup done. Remaining rows: ${count}`);
     } catch (e) {
         console.error('🧹 [CRON] auth_state cleanup failed:', e.message);
     }
@@ -82,17 +97,18 @@ async function cleanAuthState() {
 function initCron() {
     console.log('🕒 Initializing Background Cron Jobs...');
     
-    // Run once on startup (after 10 seconds to allow everything to boot)
+    // Run once on startup (after 30 seconds to allow WhatsApp to fully connect first)
     setTimeout(() => {
         runAutoDelete();
-        cleanAuthState(); // Also clean stale auth keys on startup
-    }, 10000);
+        cleanAuthState();
+    }, 30000);
     
-    // Run every 24 hours (24 * 60 * 60 * 1000 ms)
+    // Run every 24 hours
     setInterval(() => {
         runAutoDelete();
-        cleanAuthState(); // Clean auth keys daily
+        cleanAuthState();
     }, 24 * 60 * 60 * 1000);
 }
 
 module.exports = { initCron };
+
