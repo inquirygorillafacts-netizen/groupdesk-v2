@@ -18,6 +18,16 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+// Root route for frontend
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, '../frontend/index.html'));
+});
+
+// Ping route to keep Render awake
+app.get('/api/ping', (req, res) => {
+    res.status(200).send('pong');
+});
+
 // Static files (Frontend)
 app.use(express.static(path.join(__dirname, '../frontend')));
 app.use(express.json());
