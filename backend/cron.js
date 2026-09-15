@@ -61,17 +61,37 @@ async function runAutoDelete() {
     }
 }
 
+// Clean up old WhatsApp session keys (app-state-sync keys grow endlessly)
+// We keep ONLY: creds.json, device-list-*, identity-key-*, pre-key-*, sender-key-*
+// We delete: app-state-sync-key-* (these are the ones causing 14,000+ rows)
+async function cleanAuthState() {
+    try {
+        console.log('🧹 [CRON] Cleaning up stale auth_state keys...');
+        const { data, error } = await supabase
+            .from('auth_state')
+            .delete()
+            .like('file_name', 'app-state-sync-key-%');
+        
+        if (error) throw error;
+        console.log('✅ [CRON] auth_state cleanup done.');
+    } catch (e) {
+        console.error('🧹 [CRON] auth_state cleanup failed:', e.message);
+    }
+}
+
 function initCron() {
     console.log('🕒 Initializing Background Cron Jobs...');
     
     // Run once on startup (after 10 seconds to allow everything to boot)
     setTimeout(() => {
         runAutoDelete();
+        cleanAuthState(); // Also clean stale auth keys on startup
     }, 10000);
     
     // Run every 24 hours (24 * 60 * 60 * 1000 ms)
     setInterval(() => {
         runAutoDelete();
+        cleanAuthState(); // Clean auth keys daily
     }, 24 * 60 * 60 * 1000);
 }
 
