@@ -1286,6 +1286,7 @@ function openAdmin() {
     document.getElementById('admin-pin').value = '';
     document.getElementById('pin-section').classList.remove('hidden');
     document.getElementById('settings-section').classList.add('hidden');
+    document.getElementById('settings-section').classList.remove('flex');
 }
 
 function closeAdmin() {
@@ -1308,6 +1309,7 @@ async function verifyPin() {
         currentPin = pin;
         document.getElementById('pin-section').classList.add('hidden');
         document.getElementById('settings-section').classList.remove('hidden');
+        document.getElementById('settings-section').classList.add('flex');
         switchTab('groups');
         fetchSettings();
     } else {
